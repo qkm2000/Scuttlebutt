@@ -32,6 +32,7 @@ import {
 import {
 	buildMultipart,
 	calloutBlock,
+	demoteH1,
 	formatDuration,
 	joinUrl,
 	normalizeTag,
@@ -40,7 +41,6 @@ import {
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
-	structureSummary,
 	todayStamp,
 	truncate,
 	yamlString,
@@ -81,7 +81,6 @@ interface ScuttlebuttSettings {
 	notesFolder: string;
 	audioFolder: string;
 	dateFormat: string;
-	summaryUseTitle: boolean;
 	saveAudio: boolean;
 	includeTranscript: boolean;
 	includeMemo: boolean;
@@ -100,9 +99,9 @@ You are an expert at creating structured, comprehensive meeting summaries in {{l
 
 # Output Structure
 
-- Begin with a single first-level heading on the very first line: "# Summary".
-- Immediately below it, write a concise 2–4 sentence overview of the whole meeting: its purpose, the key outcomes, and any decisions.
-- After the overview, organize the details into sections. Every section heading MUST be second-level ("##") or smaller ("###"). Do NOT use another first-level ("#") heading anywhere after the first line.
+- Do NOT begin with a heading, and do NOT create a "Summary" or "Overview" heading. The note already has a title, so a top-level heading would duplicate it.
+- Start with a concise 2–4 sentence overview of the whole meeting as a plain paragraph: its purpose, the key outcomes, and any decisions.
+- After the overview, organize the details into sections. Every section heading MUST be second-level ("##") or smaller ("###"). Never use a first-level ("#") heading anywhere.
 - Under each section use bullet points for specific discussion details, decisions, and key points.
 - Include a "## Action items" section when there are any, noting owners where known.
 
@@ -140,7 +139,6 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	notesFolder: 'Scuttlebutt/Notes',
 	audioFolder: 'Scuttlebutt/Audio',
 	dateFormat: DEFAULT_DATE_FORMAT,
-	summaryUseTitle: false,
 	saveAudio: true,
 	includeTranscript: true,
 	includeMemo: true,
@@ -527,7 +525,7 @@ interface MeetingSession {
 	audioSourcePath: string | null; // set when imported from an existing vault file
 	transcript: string;
 	memo: string;
-	participants: string;
+	participants: string[];
 	contextFiles: string[];
 	summary: string;
 	title: string;
@@ -551,7 +549,7 @@ function newSession(): MeetingSession {
 		audioSourcePath: null,
 		transcript: '',
 		memo: '',
-		participants: '',
+		participants: [],
 		contextFiles: [],
 		summary: '',
 		title: '',
@@ -809,12 +807,30 @@ class ScuttlebuttView extends ItemView {
 
 		const partField = meta.createDiv('mh-field');
 		partField.createEl('label', { text: 'Participants', cls: 'mh-label' });
-		const partInput = partField.createEl('input', {
-			cls: 'mh-input',
-			attr: { type: 'text', placeholder: 'Comma-separated (optional)' },
+		const partWrap = partField.createDiv('mh-tags');
+		for (const person of s.participants) {
+			const chip = partWrap.createSpan('mh-tag');
+			chip.createSpan({ text: person });
+			const remove = chip.createSpan({ cls: 'mh-tag-x', text: '×' });
+			remove.onclick = () => {
+				s.participants = s.participants.filter((p) => p !== person);
+				this.render();
+			};
+		}
+		const addPart = partWrap.createEl('input', {
+			cls: 'mh-tag-input',
+			attr: { type: 'text', placeholder: '+ name' },
 		});
-		partInput.value = s.participants;
-		partInput.oninput = () => (s.participants = partInput.value);
+		addPart.onkeydown = (e: KeyboardEvent) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				const name = addPart.value.trim();
+				if (name && !s.participants.some((p) => p.toLowerCase() === name.toLowerCase())) {
+					s.participants.push(name);
+				}
+				this.render();
+			}
+		};
 
 		const tagsField = meta.createDiv('mh-field');
 		tagsField.createEl('label', { text: 'Tags', cls: 'mh-label' });
@@ -1348,7 +1364,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			s.summary = await this.ai.summarize({
 				transcript: s.transcript,
 				memo: s.memo,
-				participants: s.participants,
+				participants: s.participants.join(', '),
 				contextDocs,
 			});
 		} catch (err: any) {
@@ -1380,10 +1396,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 			}
 		}
 
-		// Enforce the note shape: one leading "# Summary" (or the title), overview,
-		// then only ## / smaller headings.
-		const heading = this.settings.summaryUseTitle && s.title.trim() ? s.title.trim() : 'Summary';
-		s.summary = structureSummary(s.summary, heading);
+		// Note shape: overview paragraph first, then only ## / smaller headings.
+		// Demote any stray H1 so the body never duplicates the note's title.
+		s.summary = demoteH1(s.summary);
 
 		this.setStatus('ready');
 		this.setProgress('Summary ready. Review and save.', 100);
@@ -1485,9 +1500,11 @@ export default class ScuttlebuttPlugin extends Plugin {
 		const path = await this.uniquePath(this.settings.notesFolder, base, 'md');
 
 		const fm: string[] = ['---'];
-		fm.push(`date: ${yamlString(moment(now).format(this.settings.dateFormat || DEFAULT_DATE_FORMAT))}`);
+		fm.push(`date created: ${yamlString(moment(now).format(this.settings.dateFormat || DEFAULT_DATE_FORMAT))}`);
 		if (s.tags.length > 0) fm.push(`tags: [${s.tags.map(yamlString).join(', ')}]`);
-		if (s.participants.trim()) fm.push(`participants: ${yamlString(s.participants.trim())}`);
+		if (s.participants.length > 0) {
+			fm.push(`participants: [${s.participants.map(yamlString).join(', ')}]`);
+		}
 		fm.push('---', '');
 
 		const parts: string[] = [fm.join('\n')];
@@ -1709,16 +1726,6 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.generateTags).onChange(async (v) => {
 					this.plugin.settings.generateTags = v;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName('Use the meeting title as the summary heading')
-			.setDesc('The note\'s first heading becomes the meeting title instead of "Summary".')
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.summaryUseTitle).onChange(async (v) => {
-					this.plugin.settings.summaryUseTitle = v;
 					await this.plugin.saveSettings();
 				})
 			);

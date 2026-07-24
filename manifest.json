@@ -2,7 +2,7 @@
   "id": "scuttlebutt",
   "name": "Scuttlebutt",
   "author": "Kar Min",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.4.0",
   "description": "Record or import meeting audio in the sidebar, transcribe it with your local Whisper/vLLM server, and auto-summarize it into a tidy note — with an anarlog-style title and tags.",
   "authorUrl": "",

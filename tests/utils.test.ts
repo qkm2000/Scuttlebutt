@@ -9,10 +9,10 @@ import {
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
+	demoteH1,
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
-	structureSummary,
 	todayStamp,
 	truncate,
 	yamlString,
@@ -104,18 +104,15 @@ test('calloutBlock prefixes every line and handles blanks', () => {
 	assert.equal(calloutBlock('quote', 'Memo', 'x', false), '> [!quote] Memo\n> x');
 });
 
-test('structureSummary enforces one leading H1 and demotes stray H1s', () => {
-	// Replaces the first H1 with the chosen heading.
-	assert.equal(structureSummary('# Overview\n- point', 'Summary'), '# Summary\n- point');
-	// Uses the title when provided.
-	assert.equal(structureSummary('# Whatever\ntext', 'Q3 Sync'), '# Q3 Sync\ntext');
-	// Prepends a heading when the summary has none.
-	assert.equal(structureSummary('Hello\n## Section', 'Summary'), '# Summary\n\nHello\n## Section');
-	// Demotes a later H1 to H2, keeps existing H2s.
-	assert.equal(
-		structureSummary('# Summary\n\nOverview line\n# Decisions\n## Details', 'Summary'),
-		'# Summary\n\nOverview line\n## Decisions\n## Details'
-	);
+test('demoteH1 removes all H1s (demotes to H2) and leaves the rest', () => {
+	// A stray H1 becomes H2.
+	assert.equal(demoteH1('# Title\ntext'), '## Title\ntext');
+	// No H1 => unchanged (overview paragraph + h2/h3 sections).
+	assert.equal(demoteH1('overview\n## Section\n### Sub'), 'overview\n## Section\n### Sub');
+	// Multiple H1s all demoted.
+	assert.equal(demoteH1('# A\n# B'), '## A\n## B');
+	// Leading/trailing whitespace trimmed.
+	assert.equal(demoteH1('  \n# A\n'), '## A');
 });
 
 test('buildMultipart produces a well-formed body and boundary', () => {

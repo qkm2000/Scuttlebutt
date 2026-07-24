@@ -6,6 +6,12 @@ A local-first meeting companion that lives in your Obsidian sidebar, inspired by
 
 Local-first: everything runs against endpoints you configure. No cloud, no accounts.
 
+## Why "Scuttlebutt"?
+
+On old sailing ships, the **scuttlebutt** was the cask of drinking water the crew gathered around — a *scuttle* (a hole cut in something) tapped into a *butt* (a large barrel). It was the ship's water cooler, and because sailors swapped news and gossip while drinking there, "scuttlebutt" came to mean **the talk, the rumors, the news — what everyone's discussing**.
+
+That's exactly what this plugin captures: the scuttlebutt of your meetings, turned into notes you can keep.
+
 ## What it does
 
 ```
