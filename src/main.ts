@@ -32,7 +32,6 @@ import {
 import {
 	buildMultipart,
 	calloutBlock,
-	demoteH1,
 	formatDuration,
 	joinUrl,
 	normalizeTag,
@@ -41,6 +40,7 @@ import {
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
+	structureSummary,
 	todayStamp,
 	truncate,
 	yamlString,
@@ -99,10 +99,10 @@ You are an expert at creating structured, comprehensive meeting summaries in {{l
 
 # Output Structure
 
-- Do NOT begin with a heading, and do NOT create a "Summary" or "Overview" heading. The note already has a title, so a top-level heading would duplicate it.
-- Start with a concise 2–4 sentence overview of the whole meeting as a plain paragraph: its purpose, the key outcomes, and any decisions.
-- After the overview, organize the details into sections. Every section heading MUST be second-level ("##") or smaller ("###"). Never use a first-level ("#") heading anywhere.
-- Under each section use bullet points for specific discussion details, decisions, and key points.
+- Write a short overview first: a 2–4 sentence paragraph (no heading of its own) summarizing the whole meeting — its purpose, key outcomes, and decisions. This overview is required.
+- After the overview, organize the details into sections, each introduced by a second-level ("##") heading (use "###" only for sub-points).
+- Do NOT write your own first-level ("#") heading — a single title heading is added for you automatically. Every heading you write must be "##" or smaller.
+- Under each section, use bullet points for specific discussion details, decisions, and key points.
 - Include a "## Action items" section when there are any, noting owners where known.
 
 # Format Requirements
@@ -1396,9 +1396,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 			}
 		}
 
-		// Note shape: overview paragraph first, then only ## / smaller headings.
-		// Demote any stray H1 so the body never duplicates the note's title.
-		s.summary = demoteH1(s.summary);
+		// Note shape: a single title H1, then the overview, then ## / smaller
+		// sections. Uses the generated title (falls back to "Summary").
+		s.summary = structureSummary(s.summary, s.title.trim() || 'Summary');
 
 		this.setStatus('ready');
 		this.setProgress('Summary ready. Review and save.', 100);

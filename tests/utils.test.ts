@@ -9,10 +9,10 @@ import {
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
-	demoteH1,
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
+	structureSummary,
 	todayStamp,
 	truncate,
 	yamlString,
@@ -104,15 +104,19 @@ test('calloutBlock prefixes every line and handles blanks', () => {
 	assert.equal(calloutBlock('quote', 'Memo', 'x', false), '> [!quote] Memo\n> x');
 });
 
-test('demoteH1 removes all H1s (demotes to H2) and leaves the rest', () => {
-	// A stray H1 becomes H2.
-	assert.equal(demoteH1('# Title\ntext'), '## Title\ntext');
-	// No H1 => unchanged (overview paragraph + h2/h3 sections).
-	assert.equal(demoteH1('overview\n## Section\n### Sub'), 'overview\n## Section\n### Sub');
-	// Multiple H1s all demoted.
-	assert.equal(demoteH1('# A\n# B'), '## A\n## B');
-	// Leading/trailing whitespace trimmed.
-	assert.equal(demoteH1('  \n# A\n'), '## A');
+test('structureSummary gives one title H1 + overview, demoting stray H1s', () => {
+	// Prepends the title heading above a headingless overview.
+	assert.equal(
+		structureSummary('Overview text.\n\n## Section', 'Q3 Sync'),
+		'# Q3 Sync\n\nOverview text.\n\n## Section'
+	);
+	// Replaces a model-emitted top heading with the title.
+	assert.equal(structureSummary('# Summary\nOverview.', 'Q3 Sync'), '# Q3 Sync\nOverview.');
+	// A second H1 in the body is demoted to H2; the title stays the only H1.
+	assert.equal(
+		structureSummary('Overview.\n# Decisions\n## Details', 'Q3 Sync'),
+		'# Q3 Sync\n\nOverview.\n## Decisions\n## Details'
+	);
 });
 
 test('buildMultipart produces a well-formed body and boundary', () => {

@@ -127,16 +127,24 @@ export function calloutBlock(type: string, title: string, content: string, colla
 }
 
 /**
- * Demote any top-level (#) heading in a generated summary to H2, so the note
- * body has no H1 of its own — the note's filename/title serves as the heading,
- * and every section stays `##` or smaller. Prevents a duplicate top heading.
+ * Give the summary exactly one top-level heading: `headingText` (the meeting
+ * title). If the model emitted its own H1, it's replaced; otherwise one is
+ * prepended above the overview. Any *other* H1s in the body are demoted to H2,
+ * so there's a single title heading and every section stays `##` or smaller.
  */
-export function demoteH1(summary: string): string {
-	return summary
-		.split('\n')
-		.map((line) => (/^#\s+/.test(line) ? '#' + line : line))
-		.join('\n')
-		.trim();
+export function structureSummary(summary: string, headingText: string): string {
+	const lines = summary.replace(/^\s+/, '').split('\n');
+	let i = 0;
+	while (i < lines.length && lines[i].trim() === '') i++;
+	if (i < lines.length && /^#\s+/.test(lines[i])) {
+		lines[i] = `# ${headingText}`;
+	} else {
+		lines.splice(i, 0, `# ${headingText}`, '');
+	}
+	for (let j = i + 1; j < lines.length; j++) {
+		if (/^#\s+/.test(lines[j])) lines[j] = '#' + lines[j];
+	}
+	return lines.join('\n').trim();
 }
 
 /** Build a multipart/form-data body for requestUrl (which has no FormData support). */
