@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (compiled plugin bundle + sourcemap)
+/main.js
+/main.js.map
+
+# Test build output
+.test-out/
+
+# OS / editor cruft
+.DS_Store
+*.log

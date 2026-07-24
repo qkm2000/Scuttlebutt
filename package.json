@@ -1,0 +1,30 @@
+{
+  "name": "scuttlebutt",
+  "version": "1.0.0",
+  "description": "Record, transcribe, and summarize meetings in the Obsidian sidebar with local vLLM servers",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node ./esbuild.js",
+    "build": "node ./esbuild.js",
+    "build:tests": "node ./esbuild.test.js",
+    "test": "node ./esbuild.test.js && node --test .test-out/*.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "meeting",
+    "transcription",
+    "whisper",
+    "summary"
+  ],
+  "author": "Kar Min",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "obsidian": "latest"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
