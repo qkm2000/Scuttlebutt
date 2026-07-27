@@ -11,3 +11,14 @@ node_modules/
 # OS / editor cruft
 .DS_Store
 *.log
+
+# Local WhisperX reference server — users run their own diarizing endpoint
+# and point the plugin at it, so this stays out of the plugin repo.
+server/
+
+# Secrets — never commit tokens (HF_TOKEN etc.)
+.env
+*.env
+
+# AI-coder files/folders
+.claude

@@ -37,6 +37,7 @@ import {
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
+	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
@@ -62,6 +63,7 @@ interface ScuttlebuttSettings {
 	sttModel: string;
 	sttModels: ModelOption[];
 	sttLanguage: string;
+	sttDiarize: boolean;
 
 	// Summary endpoint (LLM / vLLM)
 	llmEndpoint: string;
@@ -124,6 +126,7 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	sttModel: '',
 	sttModels: [],
 	sttLanguage: 'en',
+	sttDiarize: false,
 
 	llmEndpoint: 'http://localhost:8000/v1',
 	llmApiKey: '',
@@ -356,11 +359,24 @@ class AIService {
 		}
 	}
 
-	async transcribe(data: ArrayBuffer, filename: string, mime: string): Promise<string> {
+	async transcribe(
+		data: ArrayBuffer,
+		filename: string,
+		mime: string,
+		diarize: boolean
+	): Promise<{ text: string; hasSpeakers: boolean }> {
 		this.ensureStt();
 		const fields: Record<string, string> = { model: this.settings.sttModel };
 		const lang = this.settings.sttLanguage?.trim();
 		if (lang && lang.toLowerCase() !== 'auto') fields.language = lang;
+		// Ask the endpoint to identify speakers. A diarizing server (e.g. the bundled
+		// WhisperX one) returns per-segment speaker labels, which parseTranscriptResponse
+		// renders as turns. Most other servers ignore `diarize`; `verbose_json` is the
+		// one field a few endpoints reject, which is why the caller can retry without it.
+		if (diarize) {
+			fields.diarize = 'true';
+			fields.response_format = 'verbose_json';
+		}
 
 		const { body, contentType } = buildMultipart(fields, { field: 'file', filename, type: mime, data });
 		const headers: Record<string, string> = { 'Content-Type': contentType };
@@ -380,7 +396,7 @@ class AIService {
 		if (resp.status < 200 || resp.status >= 300) {
 			throw new Error(`Transcription failed (HTTP ${resp.status}): ${truncate(resp.text, 200)}`);
 		}
-		return parseTranscriptResponse(resp.text);
+		return { text: parseTranscriptResponse(resp.text), hasSpeakers: responseHasSpeakers(resp.text) };
 	}
 
 	private async chat(system: string, user: string, maxTokens: number, temperature: number): Promise<string> {
@@ -1322,8 +1338,22 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.setStatus('transcribing');
 		this.setProgress('Transcribing audio…', 30);
 		this.refreshViews();
+		const name = s.audioName || 'recording.webm';
+		const wantSpeakers = this.settings.sttDiarize;
+		let result: { text: string; hasSpeakers: boolean };
+		let fellBack = false;
 		try {
-			s.transcript = await this.ai.transcribe(s.audioData, s.audioName || 'recording.webm', s.audioMime);
+			try {
+				result = await this.ai.transcribe(s.audioData, name, s.audioMime, wantSpeakers);
+			} catch (diarErr) {
+				// Only the diarized attempt is worth retrying flat; a plain failure is terminal.
+				if (!wantSpeakers) throw diarErr;
+				fellBack = true;
+				new Notice('Speaker identification failed — transcribing without speaker labels.');
+				this.setProgress('Retrying without speaker identification…', 30);
+				this.refreshViews();
+				result = await this.ai.transcribe(s.audioData, name, s.audioMime, false);
+			}
 		} catch (err: any) {
 			s.error = err?.message ?? String(err);
 			this.setStatus('error');
@@ -1331,6 +1361,14 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.refreshViews();
 			new Notice('Transcription failed: ' + s.error);
 			return false;
+		}
+		s.transcript = result.text;
+		// Diarization was requested and the request *succeeded*, but the endpoint gave
+		// back no speaker labels — it silently ignored the request. Say so, so a flat
+		// transcript doesn't look like the feature is broken. (Skip if we already fell
+		// back above, which explained the flat result.)
+		if (wantSpeakers && !fellBack && !result.hasSpeakers) {
+			new Notice('This endpoint returned no speaker labels — saved as a flat transcript. It may not support speaker identification.');
 		}
 		if (!s.transcript.trim()) {
 			s.error = 'Transcription returned no text. The clip may be silent or in an unsupported format.';
@@ -1644,6 +1682,19 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			.addText((t) =>
 				t.setValue(this.plugin.settings.sttLanguage).onChange(async (v) => {
 					this.plugin.settings.sttLanguage = v.trim();
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Identify speakers')
+			.setDesc(
+				'Ask the transcription server to label who said what (diarization). Requires a ' +
+					'diarizing endpoint such as the bundled WhisperX server; plain Whisper/vLLM will ignore it.'
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.sttDiarize).onChange(async (v) => {
+					this.plugin.settings.sttDiarize = v;
 					await this.plugin.saveSettings();
 				})
 			);

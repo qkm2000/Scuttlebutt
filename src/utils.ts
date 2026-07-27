@@ -90,6 +90,40 @@ export function parseTagArray(text: string): string[] {
 	return result;
 }
 
+/**
+ * Format diarized segments as one line per speaker turn, e.g. `Speaker 1: hello`.
+ * Raw diarizer labels (`SPEAKER_00`, `SPEAKER_01`, …) are renamed to `Speaker 1`,
+ * `Speaker 2`, … in order of first appearance, and consecutive segments from the
+ * same speaker are merged into a single turn.
+ */
+export function formatDiarizedSegments(segments: any[]): string {
+	const labels = new Map<string, string>();
+	const label = (raw: string): string => {
+		if (!labels.has(raw)) labels.set(raw, `Speaker ${labels.size + 1}`);
+		return labels.get(raw) as string;
+	};
+	const turns: { who: string; text: string }[] = [];
+	for (const seg of segments) {
+		const text = String(seg?.text ?? '').trim();
+		if (!text) continue;
+		const who = seg?.speaker ? label(String(seg.speaker)) : 'Unknown speaker';
+		const last = turns[turns.length - 1];
+		if (last && last.who === who) last.text += ' ' + text;
+		else turns.push({ who, text });
+	}
+	return turns.map((t) => `${t.who}: ${t.text}`).join('\n').trim();
+}
+
+/** True if a transcription response body carries any per-segment speaker labels. */
+export function responseHasSpeakers(rawText: string): boolean {
+	try {
+		const data = JSON.parse(rawText);
+		return Array.isArray(data.segments) && data.segments.some((s: any) => s && s.speaker);
+	} catch {
+		return false;
+	}
+}
+
 /** Parse a transcription API response body into plain text, tolerating many shapes. */
 export function parseTranscriptResponse(rawText: string): string {
 	let data: any;
@@ -99,6 +133,11 @@ export function parseTranscriptResponse(rawText: string): string {
 		return rawText.trim();
 	}
 	if (typeof data === 'string') return data.trim();
+	// Speaker-labeled segments (diarization) take priority — otherwise we'd flatten
+	// the transcript and lose the "who said what" the diarizer worked to produce.
+	if (Array.isArray(data.segments) && data.segments.some((s: any) => s && s.speaker)) {
+		return formatDiarizedSegments(data.segments);
+	}
 	if (data.text) return String(data.text).trim();
 	if (Array.isArray(data.segments)) return data.segments.map((s: any) => s.text).join(' ').trim();
 	if (data.transcript) return String(data.transcript).trim();

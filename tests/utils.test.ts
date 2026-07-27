@@ -4,11 +4,13 @@ import assert from 'node:assert/strict';
 import {
 	buildMultipart,
 	calloutBlock,
+	formatDiarizedSegments,
 	formatDuration,
 	joinUrl,
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
+	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
 	stripCodeFences,
@@ -87,6 +89,41 @@ test('parseTranscriptResponse tolerates many response shapes', () => {
 		parseTranscriptResponse('{"results":{"channels":[{"alternatives":[{"transcript":"deep"}]}]}}'),
 		'deep'
 	);
+});
+
+test('parseTranscriptResponse renders diarized segments as speaker turns', () => {
+	const body = JSON.stringify({
+		text: 'hello hi there bye',
+		segments: [
+			{ text: 'hello', speaker: 'SPEAKER_00' },
+			{ text: 'hi there', speaker: 'SPEAKER_01' },
+			{ text: 'bye', speaker: 'SPEAKER_00' },
+		],
+	});
+	// Raw labels are renamed by first appearance; the flat `text` is ignored.
+	assert.equal(parseTranscriptResponse(body), 'Speaker 1: hello\nSpeaker 2: hi there\nSpeaker 1: bye');
+});
+
+test('responseHasSpeakers detects speaker labels only when present', () => {
+	assert.equal(responseHasSpeakers('{"segments":[{"text":"a","speaker":"SPEAKER_00"}]}'), true);
+	// vLLM-style: segments with timestamps but no speaker field.
+	assert.equal(responseHasSpeakers('{"text":"a","segments":[{"text":"a","start":0}]}'), false);
+	assert.equal(responseHasSpeakers('{"text":"a"}'), false);
+	assert.equal(responseHasSpeakers('plain text'), false);
+});
+
+test('formatDiarizedSegments merges consecutive turns and skips empties', () => {
+	assert.equal(
+		formatDiarizedSegments([
+			{ text: 'one', speaker: 'SPEAKER_00' },
+			{ text: '  ', speaker: 'SPEAKER_00' },
+			{ text: 'two', speaker: 'SPEAKER_00' },
+			{ text: 'three', speaker: 'SPEAKER_01' },
+		]),
+		'Speaker 1: one two\nSpeaker 2: three'
+	);
+	// A segment with no speaker falls back to a generic label rather than being dropped.
+	assert.equal(formatDiarizedSegments([{ text: 'solo' }]), 'Unknown speaker: solo');
 });
 
 test('yamlString quotes only when needed', () => {
