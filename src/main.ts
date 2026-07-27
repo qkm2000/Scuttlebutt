@@ -1919,6 +1919,16 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 						settings[opts.endpointKey] = v.trim();
 						await this.plugin.saveSettings();
 					})
+			)
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default URL')
+					.onClick(async () => {
+						settings[opts.endpointKey] = DEFAULT_SETTINGS[opts.endpointKey];
+						await this.plugin.saveSettings();
+						this.display();
+					})
 			);
 
 		new Setting(containerEl)
