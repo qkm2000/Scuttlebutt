@@ -22,6 +22,8 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	TextAreaComponent,
+	TextComponent,
 	TFile,
 	WorkspaceLeaf,
 	moment,
@@ -64,12 +66,14 @@ interface ScuttlebuttSettings {
 	sttModels: ModelOption[];
 	sttLanguage: string;
 	sttDiarize: boolean;
+	sttTimeout: number; // seconds; 0 = wait indefinitely
 
 	// Summary endpoint (LLM / vLLM)
 	llmEndpoint: string;
 	llmApiKey: string;
 	llmModel: string;
 	llmModels: ModelOption[];
+	llmTimeout: number; // seconds; 0 = wait indefinitely
 
 	// Prompts / language
 	summaryPrompt: string;
@@ -78,6 +82,7 @@ interface ScuttlebuttSettings {
 	// Capture
 	captureSystemAudio: boolean;
 	inputDeviceId: string;
+	systemAudioDeviceId: string; // optional loopback input mixed in alongside the mic
 
 	// Output
 	notesFolder: string;
@@ -127,17 +132,20 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	sttModels: [],
 	sttLanguage: 'en',
 	sttDiarize: false,
+	sttTimeout: 180,
 
 	llmEndpoint: 'http://localhost:8000/v1',
 	llmApiKey: '',
 	llmModel: '',
 	llmModels: [],
+	llmTimeout: 120,
 
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	language: 'English',
 
 	captureSystemAudio: false,
 	inputDeviceId: '',
+	systemAudioDeviceId: '',
 
 	notesFolder: 'Scuttlebutt/Notes',
 	audioFolder: 'Scuttlebutt/Audio',
@@ -167,11 +175,12 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 // Small helpers
 // ---------------------------------------------------------------------------
 
-const TRANSCRIBE_TIMEOUT = 180_000;
-const LLM_TIMEOUT = 120_000;
 const TEST_TIMEOUT = 10_000;
 
+// Race a promise against a timeout. `ms <= 0` disables the timeout (wait
+// indefinitely) — used when a server's timeout is configured to 0.
 function withTimeout<T>(promise: Promise<T>, ms: number, label = 'Request'): Promise<T> {
+	if (!ms || ms <= 0) return promise;
 	return Promise.race([
 		promise,
 		new Promise<T>((_, reject) =>
@@ -230,6 +239,7 @@ async function testEndpoint(endpoint: string, apiKey: string): Promise<TestResul
 class MeetingRecorder {
 	private mediaRecorder: MediaRecorder | null = null;
 	private stream: MediaStream | null = null;
+	private sources: MediaStream[] = [];
 	private audioContext: AudioContext | null = null;
 	private chunks: Blob[] = [];
 	private mimeType = 'audio/webm';
@@ -238,16 +248,38 @@ class MeetingRecorder {
 		return this.mediaRecorder?.state === 'recording';
 	}
 
-	async start(opts: { captureSystemAudio: boolean; inputDeviceId?: string }): Promise<{ systemAudio: boolean }> {
-		const audioConstraints: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true };
-		if (opts.inputDeviceId) audioConstraints.deviceId = { exact: opts.inputDeviceId };
-		this.stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: audioConstraints });
-
-		// Opt-in: also capture system audio and mix it in. This relies on
-		// getDisplayMedia audio, which many platforms (notably macOS) do not
-		// provide — we report back whether a system-audio track was actually
-		// obtained so the caller can tell the user.
+	async start(opts: {
+		inputDeviceId?: string;
+		systemAudioDeviceId?: string;
+		captureSystemAudio: boolean;
+	}): Promise<{ systemAudio: boolean }> {
+		// Microphone — the base track. Mic processing (echo cancellation, noise
+		// suppression) is on; a system/loopback source below is captured raw so that
+		// processing doesn't gate it.
+		const micConstraints: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true };
+		if (opts.inputDeviceId) micConstraints.deviceId = { exact: opts.inputDeviceId };
+		const micStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: micConstraints });
+		this.sources = [micStream];
 		let systemAudio = false;
+
+		// System audio as a second *input* device (e.g. a BlackHole/aggregate loopback
+		// on macOS). This is the reliable way to capture system/meeting audio; it's
+		// mixed with the mic into one track.
+		if (opts.systemAudioDeviceId && opts.systemAudioDeviceId !== opts.inputDeviceId) {
+			try {
+				const sysStream = await navigator.mediaDevices.getUserMedia({
+					video: false,
+					audio: { deviceId: { exact: opts.systemAudioDeviceId } },
+				});
+				this.sources.push(sysStream);
+				systemAudio = true;
+			} catch {
+				/* device unavailable — degrade to whatever else we have */
+			}
+		}
+
+		// System audio via a screen-share prompt (works on some platforms, not reliably
+		// on macOS). Kept as an alternative to the loopback-device route above.
 		if (opts.captureSystemAudio) {
 			try {
 				const screen = await navigator.mediaDevices
@@ -255,15 +287,18 @@ class MeetingRecorder {
 					.catch(() => null);
 				if (screen) {
 					if (screen.getAudioTracks().length > 0) {
-						this.mixIn(screen);
+						this.sources.push(new MediaStream(screen.getAudioTracks()));
 						systemAudio = true;
 					}
 					screen.getVideoTracks().forEach((t) => t.stop());
 				}
 			} catch {
-				/* mic-only fallback */
+				/* ignore — degrade gracefully */
 			}
 		}
+
+		// A single source records directly; multiple sources are mixed into one track.
+		this.stream = this.sources.length > 1 ? this.mix(this.sources) : micStream;
 
 		const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
 		this.mimeType = candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? 'audio/webm';
@@ -277,17 +312,16 @@ class MeetingRecorder {
 		return { systemAudio };
 	}
 
-	private mixIn(screen: MediaStream) {
+	/** Mix several audio streams down to a single MediaStream via the Web Audio graph. */
+	private mix(streams: MediaStream[]): MediaStream {
 		this.audioContext = new AudioContext();
 		const dest = this.audioContext.createMediaStreamDestination();
-		const connect = (s: MediaStream) => {
+		for (const s of streams) {
 			for (const track of s.getAudioTracks()) {
-				this.audioContext!.createMediaStreamSource(new MediaStream([track])).connect(dest);
+				this.audioContext.createMediaStreamSource(new MediaStream([track])).connect(dest);
 			}
-		};
-		if (this.stream) connect(this.stream);
-		connect(screen);
-		this.stream = dest.stream;
+		}
+		return dest.stream;
 	}
 
 	stop(): Promise<Blob> {
@@ -310,6 +344,12 @@ class MeetingRecorder {
 	}
 
 	private cleanup() {
+		// Stop every raw source (mic + any system/loopback + display) as well as the
+		// final (possibly mixed) stream, so no device is left in use.
+		for (const s of this.sources) {
+			for (const track of s.getTracks()) track.stop();
+		}
+		this.sources = [];
 		if (this.stream) {
 			for (const track of this.stream.getTracks()) track.stop();
 			this.stream = null;
@@ -359,11 +399,61 @@ class AIService {
 		}
 	}
 
+	/**
+	 * POST and return the raw status + body text. Uses `fetch` so the request can be
+	 * aborted mid-flight via `signal` (that's the whole point — Obsidian's requestUrl
+	 * can't be cancelled). If fetch fails for a reason that ISN'T an abort or timeout —
+	 * typically a server that doesn't send CORS headers — it falls back to requestUrl,
+	 * which is CORS-immune but uncancellable, so existing setups keep working.
+	 */
+	private async request(
+		url: string,
+		headers: Record<string, string>,
+		body: ArrayBuffer | string,
+		timeoutMs: number,
+		label: string,
+		signal?: AbortSignal
+	): Promise<{ status: number; text: string }> {
+		const controller = new AbortController();
+		const onExternalAbort = () => controller.abort();
+		if (signal) {
+			if (signal.aborted) controller.abort();
+			else signal.addEventListener('abort', onExternalAbort, { once: true });
+		}
+		let timedOut = false;
+		const timer =
+			timeoutMs > 0
+				? window.setTimeout(() => {
+						timedOut = true;
+						controller.abort();
+				  }, timeoutMs)
+				: null;
+		try {
+			const resp = await fetch(url, { method: 'POST', headers, body, signal: controller.signal });
+			return { status: resp.status, text: await resp.text() };
+		} catch (err) {
+			if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+			if (timedOut) throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
+			// Not an abort and not a timeout — most often a CORS/network failure. Retry
+			// through requestUrl (no CORS check, but no cancellation either).
+			const resp = await withTimeout(
+				requestUrl({ url, method: 'POST', headers, body, throw: false }),
+				timeoutMs,
+				label
+			);
+			return { status: resp.status, text: resp.text };
+		} finally {
+			if (timer !== null) window.clearTimeout(timer);
+			if (signal) signal.removeEventListener('abort', onExternalAbort);
+		}
+	}
+
 	async transcribe(
 		data: ArrayBuffer,
 		filename: string,
 		mime: string,
-		diarize: boolean
+		diarize: boolean,
+		signal?: AbortSignal
 	): Promise<{ text: string; hasSpeakers: boolean }> {
 		this.ensureStt();
 		const fields: Record<string, string> = { model: this.settings.sttModel };
@@ -382,16 +472,13 @@ class AIService {
 		const headers: Record<string, string> = { 'Content-Type': contentType };
 		if (this.settings.sttApiKey) headers['Authorization'] = 'Bearer ' + this.settings.sttApiKey;
 
-		const resp = await withTimeout(
-			requestUrl({
-				url: joinUrl(this.settings.sttEndpoint, 'audio/transcriptions'),
-				method: 'POST',
-				headers,
-				body,
-				throw: false,
-			}),
-			TRANSCRIBE_TIMEOUT,
-			'Transcription'
+		const resp = await this.request(
+			joinUrl(this.settings.sttEndpoint, 'audio/transcriptions'),
+			headers,
+			body,
+			this.settings.sttTimeout * 1000,
+			'Transcription',
+			signal
 		);
 		if (resp.status < 200 || resp.status >= 300) {
 			throw new Error(`Transcription failed (HTTP ${resp.status}): ${truncate(resp.text, 200)}`);
@@ -399,47 +486,53 @@ class AIService {
 		return { text: parseTranscriptResponse(resp.text), hasSpeakers: responseHasSpeakers(resp.text) };
 	}
 
-	private async chat(system: string, user: string, maxTokens: number, temperature: number): Promise<string> {
+	private async chat(
+		system: string,
+		user: string,
+		maxTokens: number,
+		temperature: number,
+		signal?: AbortSignal
+	): Promise<string> {
 		this.ensureLlm();
 		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 		if (this.settings.llmApiKey) headers['Authorization'] = 'Bearer ' + this.settings.llmApiKey;
-		const resp = await withTimeout(
-			requestUrl({
-				url: joinUrl(this.settings.llmEndpoint, 'chat/completions'),
-				method: 'POST',
-				headers,
-				body: JSON.stringify({
-					model: this.settings.llmModel,
-					messages: [
-						{ role: 'system', content: system },
-						{ role: 'user', content: user },
-					],
-					max_tokens: maxTokens,
-					temperature,
-				}),
-				throw: false,
+		const resp = await this.request(
+			joinUrl(this.settings.llmEndpoint, 'chat/completions'),
+			headers,
+			JSON.stringify({
+				model: this.settings.llmModel,
+				messages: [
+					{ role: 'system', content: system },
+					{ role: 'user', content: user },
+				],
+				max_tokens: maxTokens,
+				temperature,
 			}),
-			LLM_TIMEOUT,
-			'Summary'
+			this.settings.llmTimeout * 1000,
+			'Summary',
+			signal
 		);
 		if (resp.status < 200 || resp.status >= 300) {
 			throw new Error(`LLM request failed (HTTP ${resp.status}): ${truncate(resp.text, 200)}`);
 		}
 		let data: any;
 		try {
-			data = resp.json;
+			data = JSON.parse(resp.text);
 		} catch {
 			throw new Error('LLM endpoint returned a non-JSON response.');
 		}
 		return String(data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '').trim();
 	}
 
-	async summarize(input: {
-		transcript: string;
-		memo: string;
-		participants: string;
-		contextDocs: { path: string; content: string }[];
-	}): Promise<string> {
+	async summarize(
+		input: {
+			transcript: string;
+			memo: string;
+			participants: string;
+			contextDocs: { path: string; content: string }[];
+		},
+		signal?: AbortSignal
+	): Promise<string> {
 		const system = this.settings.summaryPrompt.replace(/\{\{\s*language\s*\}\}/g, this.settings.language || 'English');
 		const parts: string[] = [];
 		parts.push('# Context');
@@ -459,11 +552,11 @@ class AIService {
 		parts.push('\n# Transcript');
 		parts.push(input.transcript.trim() || '(empty)');
 
-		const summary = await this.chat(system, parts.join('\n'), 8192, 0.3);
+		const summary = await this.chat(system, parts.join('\n'), 8192, 0.3, signal);
 		return stripCodeFences(summary);
 	}
 
-	async generateTitle(content: string): Promise<string> {
+	async generateTitle(content: string, signal?: AbortSignal): Promise<string> {
 		const language = this.settings.language || 'English';
 		const system =
 			`Current date: ${todayStamp(new Date())}\n\n` +
@@ -473,12 +566,17 @@ class AIService {
 			`- Never ask questions or request more information.\n` +
 			`- If the note is empty or has no meaningful content, output exactly: <EMPTY>`;
 		const user = `<note>\n${content}\n</note>\n\nNow, give me a SUPER CONCISE title for the above note. Only about the topic of the meeting.`;
-		const out = (await this.chat(system, user, 64, 0.3)).trim();
+		const out = (await this.chat(system, user, 64, 0.3, signal)).trim();
 		if (!out || out === '<EMPTY>') return '';
 		return sanitizeTitle(out);
 	}
 
-	async generateTags(title: string, content: string, historicalTags: string[]): Promise<string[]> {
+	async generateTags(
+		title: string,
+		content: string,
+		historicalTags: string[],
+		signal?: AbortSignal
+	): Promise<string[]> {
 		const defaults = this.settings.defaultTags.join(', ');
 		const system =
 			`You are an intelligent tagging assistant. Suggest 3–5 concise, specific tags for a meeting note.\n\n` +
@@ -498,7 +596,7 @@ class AIService {
 				? `## Existing tags in the vault (reuse these when they fit)\n${historicalTags.join(', ')}\n\n`
 				: '## Existing tags in the vault\n(none yet)\n\n';
 		const user = `${existing}## Note\n\n**Title:** ${title || '(untitled)'}\n\n**Content:**\n${content}`;
-		const out = await this.chat(system, user, 128, 0.4);
+		const out = await this.chat(system, user, 128, 0.4, signal);
 		const tags = parseTagArray(out)
 			.map(normalizeTag)
 			.filter((t) => t.length > 0);
@@ -543,6 +641,7 @@ interface MeetingSession {
 	memo: string;
 	participants: string[];
 	contextFiles: string[];
+	diarize: boolean; // per-recording speaker identification (defaults from settings)
 	summary: string;
 	title: string;
 	tags: string[];
@@ -556,7 +655,7 @@ interface MeetingSession {
 	savedNotePath: string | null;
 }
 
-function newSession(): MeetingSession {
+function newSession(diarizeDefault = false): MeetingSession {
 	return {
 		status: 'idle',
 		audioData: null,
@@ -567,6 +666,7 @@ function newSession(): MeetingSession {
 		memo: '',
 		participants: [],
 		contextFiles: [],
+		diarize: diarizeDefault,
 		summary: '',
 		title: '',
 		tags: [],
@@ -782,6 +882,19 @@ class ScuttlebuttView extends ItemView {
 		diskBtn.disabled = recording || busy;
 		diskBtn.onclick = () => this.uploadAudioFromDisk();
 
+		// Per-recording speaker identification, seeded from the global default. Flipping
+		// this after a transcript exists takes effect on the next (Re-)transcribe.
+		const diarRow = card.createDiv('mh-diar-row');
+		const diarToggle = diarRow.createEl('label', { cls: 'mh-diar' });
+		const diarCb = diarToggle.createEl('input', { attr: { type: 'checkbox' } });
+		diarCb.checked = s.diarize;
+		diarCb.disabled = recording || busy;
+		setIcon(diarToggle.createSpan('mh-diar-icon'), 'users');
+		diarToggle.createSpan({ text: 'Identify speakers' });
+		diarCb.onchange = () => {
+			s.diarize = diarCb.checked;
+		};
+
 		if (s.audioName && s.status !== 'recording') {
 			const clip = card.createDiv('mh-clip');
 			setIcon(clip.createSpan('mh-clip-icon'), 'audio-file');
@@ -806,6 +919,19 @@ class ScuttlebuttView extends ItemView {
 			cls: 'mh-empty-text',
 			text: 'Record a meeting or import an audio clip. Add any notes as context, and a summary is written for you.',
 		});
+	}
+
+	/**
+	 * Insert a tag/participant chip just before `before` (the text input). Adding a
+	 * chip this way avoids a full re-render, so the input keeps focus and the user can
+	 * keep typing the next entry instead of the cursor jumping away.
+	 */
+	private insertChip(wrap: HTMLElement, before: HTMLElement, text: string, onRemove: () => void): void {
+		const chip = createSpan('mh-tag');
+		wrap.insertBefore(chip, before);
+		chip.createSpan({ text });
+		const remove = chip.createSpan({ cls: 'mh-tag-x', text: '×' });
+		remove.onclick = onRemove;
 	}
 
 	private renderMeta(root: HTMLElement): void {
@@ -838,14 +964,17 @@ class ScuttlebuttView extends ItemView {
 			attr: { type: 'text', placeholder: '+ name' },
 		});
 		addPart.onkeydown = (e: KeyboardEvent) => {
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				const name = addPart.value.trim();
-				if (name && !s.participants.some((p) => p.toLowerCase() === name.toLowerCase())) {
-					s.participants.push(name);
-				}
-				this.render();
+			if (e.key !== 'Enter') return;
+			e.preventDefault();
+			const name = addPart.value.trim();
+			if (name && !s.participants.some((p) => p.toLowerCase() === name.toLowerCase())) {
+				s.participants.push(name);
+				this.insertChip(partWrap, addPart, name, () => {
+					s.participants = s.participants.filter((p) => p !== name);
+					this.render();
+				});
 			}
+			addPart.value = '';
 		};
 
 		const tagsField = meta.createDiv('mh-field');
@@ -865,12 +994,17 @@ class ScuttlebuttView extends ItemView {
 			attr: { type: 'text', placeholder: '+ tag' },
 		});
 		addTag.onkeydown = (e: KeyboardEvent) => {
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				const t = normalizeTag(addTag.value);
-				if (t && !s.tags.some((x) => x.toLowerCase() === t.toLowerCase())) s.tags.push(t);
-				this.render();
+			if (e.key !== 'Enter') return;
+			e.preventDefault();
+			const t = normalizeTag(addTag.value);
+			if (t && !s.tags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+				s.tags.push(t);
+				this.insertChip(tagsWrap, addTag, '#' + t, () => {
+					s.tags = s.tags.filter((x) => x !== t);
+					this.render();
+				});
 			}
+			addTag.value = '';
 		};
 	}
 
@@ -1026,7 +1160,12 @@ class ScuttlebuttView extends ItemView {
 			const fill = track.createDiv('mh-bar-fill');
 			fill.style.width = Math.max(4, Math.min(100, s.progressPct)) + '%';
 			if (s.progressPct < 100) fill.addClass('is-animated');
-			wrap.createDiv({ cls: 'mh-progress-label', text: s.progressLabel });
+			const row = wrap.createDiv('mh-progress-row');
+			row.createDiv({ cls: 'mh-progress-label', text: s.progressLabel });
+			if (s.status === 'transcribing' || s.status === 'summarizing') {
+				const cancel = row.createEl('button', { cls: 'mh-cancel-btn', text: 'Cancel' });
+				cancel.onclick = () => this.plugin.cancelActive();
+			}
 		}
 	}
 
@@ -1082,6 +1221,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 	ai!: AIService;
 	private statusBarEl: HTMLElement | null = null;
 	private statusBarTimer: number | null = null;
+	// In-flight transcription/summary request, so the user can cancel it. `cancelled`
+	// distinguishes a user abort from a genuine failure in the catch handlers.
+	private activeController: AbortController | null = null;
+	private cancelled = false;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -1199,21 +1342,23 @@ export default class ScuttlebuttPlugin extends Plugin {
 		let result: { systemAudio: boolean };
 		try {
 			result = await this.recorder.start({
-				captureSystemAudio: this.settings.captureSystemAudio,
 				inputDeviceId: this.settings.inputDeviceId,
+				systemAudioDeviceId: this.settings.systemAudioDeviceId,
+				captureSystemAudio: this.settings.captureSystemAudio,
 			});
 		} catch (err: any) {
 			new Notice('Microphone access failed: ' + (err?.message ?? err));
 			return;
 		}
-		if (this.settings.captureSystemAudio && !result.systemAudio) {
+		if ((this.settings.systemAudioDeviceId || this.settings.captureSystemAudio) && !result.systemAudio) {
 			new Notice(
 				'System audio could not be captured — recording microphone only. ' +
-					'On macOS this needs a loopback device (e.g. BlackHole); see Settings → Capture.',
+					'On macOS, install a loopback device (e.g. BlackHole) and pick it as the ' +
+					'System audio device in Settings → Capture.',
 				8000
 			);
 		}
-		this.session = newSession();
+		this.session = newSession(this.settings.sttDiarize);
 		this.session.startedAt = Date.now();
 		this.setStatus('recording');
 		this.startStatusBarTimer();
@@ -1247,7 +1392,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async importFromVault(file: TFile): Promise<void> {
 		try {
 			const data = await this.app.vault.readBinary(file);
-			this.session = newSession();
+			this.session = newSession(this.settings.sttDiarize);
 			this.session.audioData = data;
 			this.session.audioMime = this.mimeForExtension(file.extension);
 			this.session.audioName = file.name;
@@ -1263,7 +1408,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async importFromDisk(file: File): Promise<void> {
 		try {
 			const data = await file.arrayBuffer();
-			this.session = newSession();
+			this.session = newSession(this.settings.sttDiarize);
 			this.session.audioData = data;
 			this.session.audioMime = file.type || this.mimeForExtension(file.name.split('.').pop() ?? '');
 			this.session.audioName = file.name;
@@ -1339,28 +1484,38 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.setProgress('Transcribing audio…', 30);
 		this.refreshViews();
 		const name = s.audioName || 'recording.webm';
-		const wantSpeakers = this.settings.sttDiarize;
+		const wantSpeakers = s.diarize;
+		this.cancelled = false;
+		const controller = new AbortController();
+		this.activeController = controller;
 		let result: { text: string; hasSpeakers: boolean };
 		let fellBack = false;
 		try {
 			try {
-				result = await this.ai.transcribe(s.audioData, name, s.audioMime, wantSpeakers);
+				result = await this.ai.transcribe(s.audioData, name, s.audioMime, wantSpeakers, controller.signal);
 			} catch (diarErr) {
-				// Only the diarized attempt is worth retrying flat; a plain failure is terminal.
-				if (!wantSpeakers) throw diarErr;
+				// A cancel or a non-diarized failure is terminal; only a diarized attempt
+				// is worth retrying flat.
+				if (this.cancelled || !wantSpeakers) throw diarErr;
 				fellBack = true;
 				new Notice('Speaker identification failed — transcribing without speaker labels.');
 				this.setProgress('Retrying without speaker identification…', 30);
 				this.refreshViews();
-				result = await this.ai.transcribe(s.audioData, name, s.audioMime, false);
+				result = await this.ai.transcribe(s.audioData, name, s.audioMime, false, controller.signal);
 			}
 		} catch (err: any) {
+			if (this.cancelled) {
+				this.finishCancelled();
+				return false;
+			}
 			s.error = err?.message ?? String(err);
 			this.setStatus('error');
 			this.setProgress('', 0);
 			this.refreshViews();
 			new Notice('Transcription failed: ' + s.error);
 			return false;
+		} finally {
+			this.activeController = null;
 		}
 		s.transcript = result.text;
 		// Diarization was requested and the request *succeeded*, but the endpoint gave
@@ -1398,50 +1553,73 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 		const contextDocs = await this.readContextDocs();
 
+		this.cancelled = false;
+		const controller = new AbortController();
+		this.activeController = controller;
 		try {
-			s.summary = await this.ai.summarize({
-				transcript: s.transcript,
-				memo: s.memo,
-				participants: s.participants.join(', '),
-				contextDocs,
-			});
-		} catch (err: any) {
-			s.error = err?.message ?? String(err);
-			this.setStatus('error');
-			this.setProgress('', 0);
+			try {
+				s.summary = await this.ai.summarize(
+					{
+						transcript: s.transcript,
+						memo: s.memo,
+						participants: s.participants.join(', '),
+						contextDocs,
+					},
+					controller.signal
+				);
+			} catch (err: any) {
+				if (this.cancelled) {
+					this.finishCancelled();
+					return;
+				}
+				s.error = err?.message ?? String(err);
+				this.setStatus('error');
+				this.setProgress('', 0);
+				this.refreshViews();
+				new Notice('Summarization failed: ' + s.error);
+				return;
+			}
+
+			// Title + tags are best-effort; failures here don't block the summary
+			// (but a cancel still stops the whole run).
+			this.setProgress('Naming & tagging…', 85);
 			this.refreshViews();
-			new Notice('Summarization failed: ' + s.error);
-			return;
-		}
+			const basis = s.summary || s.transcript;
 
-		// Title + tags are best-effort; failures here don't block the summary.
-		this.setProgress('Naming & tagging…', 85);
-		this.refreshViews();
-		const basis = s.summary || s.transcript;
-
-		if (this.settings.generateTitle && !s.title.trim()) {
-			try {
-				s.title = await this.ai.generateTitle(basis);
-			} catch (err) {
-				console.warn('Scuttlebutt: title generation failed', err);
+			if (this.settings.generateTitle && !s.title.trim()) {
+				try {
+					s.title = await this.ai.generateTitle(basis, controller.signal);
+				} catch (err) {
+					if (this.cancelled) {
+						this.finishCancelled();
+						return;
+					}
+					console.warn('Scuttlebutt: title generation failed', err);
+				}
 			}
-		}
-		if (this.settings.generateTags && s.tags.length === 0) {
-			try {
-				s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags());
-			} catch (err) {
-				console.warn('Scuttlebutt: tag generation failed', err);
+			if (this.settings.generateTags && s.tags.length === 0) {
+				try {
+					s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags(), controller.signal);
+				} catch (err) {
+					if (this.cancelled) {
+						this.finishCancelled();
+						return;
+					}
+					console.warn('Scuttlebutt: tag generation failed', err);
+				}
 			}
+
+			// Note shape: a single title H1, then the overview, then ## / smaller
+			// sections. Uses the generated title (falls back to "Summary").
+			s.summary = structureSummary(s.summary, s.title.trim() || 'Summary');
+
+			this.setStatus('ready');
+			this.setProgress('Summary ready. Review and save.', 100);
+			this.refreshViews();
+			window.setTimeout(() => this.clearProgressIfIdle(), 4000);
+		} finally {
+			this.activeController = null;
 		}
-
-		// Note shape: a single title H1, then the overview, then ## / smaller
-		// sections. Uses the generated title (falls back to "Summary").
-		s.summary = structureSummary(s.summary, s.title.trim() || 'Summary');
-
-		this.setStatus('ready');
-		this.setProgress('Summary ready. Review and save.', 100);
-		this.refreshViews();
-		window.setTimeout(() => this.clearProgressIfIdle(), 4000);
 	}
 
 	private clearProgressIfIdle(): void {
@@ -1449,6 +1627,25 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.setProgress('', 0);
 			this.refreshViews();
 		}
+	}
+
+	/** Abort the in-flight transcription/summary request, if any. */
+	cancelActive(): void {
+		if (!this.activeController) return;
+		this.cancelled = true;
+		this.activeController.abort();
+		this.setProgress('Cancelling…', this.session.progressPct);
+		this.refreshViews();
+	}
+
+	/** Reset the UI to a usable state after the user cancels, keeping any existing work. */
+	private finishCancelled(): void {
+		const s = this.session;
+		s.error = null;
+		this.setStatus(s.summary ? 'ready' : s.audioData ? 'recorded' : 'idle');
+		this.setProgress('', 0);
+		this.refreshViews();
+		new Notice('Cancelled.');
 	}
 
 	private async readContextDocs(): Promise<{ path: string; content: string }[]> {
@@ -1567,7 +1764,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	resetSession(): void {
 		if (this.recorder.isRecording()) this.recorder.abort();
 		this.stopStatusBarTimer();
-		this.session = newSession();
+		this.session = newSession(this.settings.sttDiarize);
 		this.refreshViews();
 	}
 
@@ -1639,6 +1836,8 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 class ScuttlebuttSettingTab extends PluginSettingTab {
 	private audioInputs: MediaDeviceInfo[] = [];
+	private deviceDropdown: DropdownComponent | null = null;
+	private systemDeviceDropdown: DropdownComponent | null = null;
 
 	constructor(app: App, private plugin: ScuttlebuttPlugin) {
 		super(app, plugin);
@@ -1659,7 +1858,28 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 		} catch {
 			this.audioInputs = [];
 		}
-		this.display();
+		// Repopulate the device dropdowns in place rather than this.display(), which
+		// would rebuild the settings tab and scroll it back to the top.
+		if (this.deviceDropdown) this.populateDeviceDropdown(this.deviceDropdown, 'inputDeviceId', 'System default');
+		if (this.systemDeviceDropdown) {
+			this.populateDeviceDropdown(this.systemDeviceDropdown, 'systemAudioDeviceId', 'Off');
+		}
+	}
+
+	/** Fill a device dropdown from the detected inputs. Used on first render and after
+	 *  re-detecting, so a refresh doesn't rebuild the whole settings tab. */
+	private populateDeviceDropdown(
+		d: DropdownComponent,
+		key: 'inputDeviceId' | 'systemAudioDeviceId',
+		firstLabel: string
+	): void {
+		d.selectEl.empty();
+		d.addOption('', firstLabel);
+		for (const dev of this.audioInputs) {
+			d.addOption(dev.deviceId, dev.label || `Input (${dev.deviceId.slice(0, 6)}…)`);
+		}
+		const saved = this.plugin.settings[key];
+		d.setValue(this.audioInputs.some((x) => x.deviceId === saved) ? saved : '');
 	}
 
 	display(): void {
@@ -1674,6 +1894,7 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			apiKeyKey: 'sttApiKey',
 			modelKey: 'sttModel',
 			modelsKey: 'sttModels',
+			timeoutKey: 'sttTimeout',
 		});
 
 		new Setting(containerEl)
@@ -1689,8 +1910,9 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Identify speakers')
 			.setDesc(
-				'Ask the transcription server to label who said what (diarization). Requires a ' +
-					'diarizing endpoint such as the bundled WhisperX server; plain Whisper/vLLM will ignore it.'
+				'Default for new recordings: ask the server to label who said what (diarization). ' +
+					'You can flip it per recording in the sidebar. Requires a diarizing endpoint such as ' +
+					'the WhisperX server; plain Whisper/vLLM will ignore it.'
 			)
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.sttDiarize).onChange(async (v) => {
@@ -1706,6 +1928,7 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			apiKeyKey: 'llmApiKey',
 			modelKey: 'llmModel',
 			modelsKey: 'llmModels',
+			timeoutKey: 'llmTimeout',
 		});
 
 		new Setting(containerEl).setName('Capture').setHeading();
@@ -1717,12 +1940,8 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					'device (e.g. BlackHole) and record from an aggregate device that includes it, then select it here.'
 			)
 			.addDropdown((d) => {
-				d.addOption('', 'System default');
-				for (const dev of this.audioInputs) {
-					d.addOption(dev.deviceId, dev.label || `Input (${dev.deviceId.slice(0, 6)}…)`);
-				}
-				const saved = this.plugin.settings.inputDeviceId;
-				d.setValue(this.audioInputs.some((x) => x.deviceId === saved) ? saved : '');
+				this.deviceDropdown = d;
+				this.populateDeviceDropdown(d, 'inputDeviceId', 'System default');
 				d.onChange(async (v) => {
 					this.plugin.settings.inputDeviceId = v;
 					await this.plugin.saveSettings();
@@ -1736,11 +1955,34 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('System audio device')
+			.setDesc(
+				'Optional second input, recorded alongside the mic and mixed into one track. Pick a ' +
+					'loopback device that carries system/meeting audio (e.g. BlackHole on macOS). ' +
+					'Leave "Off" to record the microphone only.'
+			)
+			.addDropdown((d) => {
+				this.systemDeviceDropdown = d;
+				this.populateDeviceDropdown(d, 'systemAudioDeviceId', 'Off');
+				d.onChange(async (v) => {
+					this.plugin.settings.systemAudioDeviceId = v;
+					await this.plugin.saveSettings();
+				});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('refresh-cw')
+					.setTooltip('Detect input devices')
+					.onClick(() => this.detectDevices())
+			);
+
+		new Setting(containerEl)
 			.setName('Capture system audio')
 			.setDesc(
-				'Also mix in system audio via a screen-share prompt. This works on some platforms but ' +
-					'not reliably on macOS — if no system audio is captured you will be told, and recording ' +
-					'continues with the microphone. For macOS, prefer the loopback-device route above.'
+				'Alternative to the device above: mix in system audio via a screen-share prompt. ' +
+					'Works on some platforms but not reliably on macOS — if no system audio is captured ' +
+					'you will be told, and recording continues with the microphone. On macOS, prefer the ' +
+					'"System audio device" option above.'
 			)
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.captureSystemAudio).onChange(async (v) => {
@@ -1871,10 +2113,12 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl).setName('Summary prompt').setHeading();
+		let promptArea!: TextAreaComponent;
 		new Setting(containerEl)
 			.setName('System prompt')
 			.setDesc('Sent as the system message. Use {{language}} where the language should appear.')
 			.addTextArea((t) => {
+				promptArea = t;
 				t.setValue(this.plugin.settings.summaryPrompt).onChange(async (v) => {
 					this.plugin.settings.summaryPrompt = v;
 					await this.plugin.saveSettings();
@@ -1889,7 +2133,9 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					.onClick(async () => {
 						this.plugin.settings.summaryPrompt = DEFAULT_SUMMARY_PROMPT;
 						await this.plugin.saveSettings();
-						this.display();
+						// Update in place instead of this.display(), which would jump the
+						// settings page back to the top.
+						promptArea.setValue(DEFAULT_SUMMARY_PROMPT);
 					})
 			);
 	}
@@ -1903,23 +2149,25 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			apiKeyKey: 'sttApiKey' | 'llmApiKey';
 			modelKey: 'sttModel' | 'llmModel';
 			modelsKey: 'sttModels' | 'llmModels';
+			timeoutKey: 'sttTimeout' | 'llmTimeout';
 		}
 	): void {
 		const settings = this.plugin.settings;
 		new Setting(containerEl).setName(opts.heading).setDesc(opts.desc).setHeading();
 
+		let urlText!: TextComponent;
 		new Setting(containerEl)
 			.setName('Endpoint URL')
 			.setDesc('Base URL ending in /v1')
-			.addText((t) =>
-				t
-					.setPlaceholder('http://localhost:8000/v1')
+			.addText((t) => {
+				urlText = t;
+				t.setPlaceholder('http://localhost:8000/v1')
 					.setValue(settings[opts.endpointKey])
 					.onChange(async (v) => {
 						settings[opts.endpointKey] = v.trim();
 						await this.plugin.saveSettings();
-					})
-			)
+					});
+			})
 			.addExtraButton((b) =>
 				b
 					.setIcon('rotate-ccw')
@@ -1927,7 +2175,9 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					.onClick(async () => {
 						settings[opts.endpointKey] = DEFAULT_SETTINGS[opts.endpointKey];
 						await this.plugin.saveSettings();
-						this.display();
+						// Update the field in place — this.display() would rebuild the whole
+						// settings tab and scroll it back to the top.
+						urlText.setValue(settings[opts.endpointKey]);
 					})
 			);
 
@@ -1974,6 +2224,38 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		const timeoutKey = opts.timeoutKey;
+		let timeoutText!: TextComponent;
+		new Setting(containerEl)
+			.setName('Request timeout')
+			.setDesc(
+				'Seconds to wait for the server before giving up. Set 0 to wait ' +
+					'indefinitely — useful for long recordings on a slow or busy server.'
+			)
+			.addText((t) => {
+				timeoutText = t;
+				t.inputEl.type = 'number';
+				t.inputEl.min = '0';
+				t.inputEl.step = '5';
+				t.setValue(String(settings[timeoutKey])).onChange(async (v) => {
+					const n = Number(v);
+					if (Number.isFinite(n) && n >= 0) {
+						settings[timeoutKey] = Math.floor(n);
+						await this.plugin.saveSettings();
+					}
+				});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						settings[timeoutKey] = DEFAULT_SETTINGS[timeoutKey];
+						await this.plugin.saveSettings();
+						timeoutText.setValue(String(settings[timeoutKey]));
+					})
+			);
 
 		const statusEl = createSpan({ cls: 'mh-test-status' });
 
