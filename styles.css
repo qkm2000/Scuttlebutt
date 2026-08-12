@@ -169,6 +169,37 @@
 	gap: 8px;
 }
 
+/* per-recording "Identify speakers" toggle */
+.mh-diar-row {
+	display: flex;
+	padding: 1px 2px;
+}
+
+.mh-diar {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.mh-diar input {
+	margin: 0;
+	cursor: pointer;
+}
+
+.mh-diar-icon {
+	display: inline-flex;
+	color: var(--text-faint);
+}
+
+.mh-diar-icon svg {
+	width: 13px;
+	height: 13px;
+}
+
 .mh-ghost-btn {
 	display: inline-flex;
 	align-items: center;
@@ -555,9 +586,34 @@
 	to { background-position: -200% 0; }
 }
 
+.mh-progress-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
 .mh-progress-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
+}
+
+.mh-cancel-btn {
+	flex: 0 0 auto;
+	padding: 3px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.mh-cancel-btn:hover {
+	background: rgba(229, 72, 77, 0.12);
+	color: #e5484d;
+	border-color: rgba(229, 72, 77, 0.4);
 }
 
 .mh-error {
@@ -604,6 +660,16 @@
 .mh-settings .setting-item-heading .setting-item-description {
 	text-transform: none;
 	letter-spacing: 0;
+}
+
+/* Keep dropdowns a fixed width so long option labels don't stretch the setting
+   row. Without this, detecting input devices (or loading long model IDs) widens
+   the native <select> to its longest option and pushes the layout. */
+.mh-settings .setting-item-control .dropdown {
+	max-width: 16rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .mh-test-status {
