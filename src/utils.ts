@@ -63,6 +63,73 @@ export function normalizeTag(raw: string): string {
 		.replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Split a reasoning-model response into the answer and the "thinking" (Qwen3
+ * `<think>…</think>`, etc.). Handles complete blocks, a dangling open block left by a
+ * truncated or still-streaming generation, and an orphan closing tag emitted when a
+ * reasoning parser has already consumed the opening `<think>`. Both parts are trimmed.
+ */
+export function splitReasoning(text: string): { answer: string; reasoning: string } {
+	const reasoning: string[] = [];
+	let answer = '';
+	const blockRe = /<think>([\s\S]*?)<\/think>/gi;
+	let lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = blockRe.exec(text)) !== null) {
+		answer += text.slice(lastIndex, m.index);
+		reasoning.push(m[1]);
+		lastIndex = blockRe.lastIndex;
+	}
+	const tail = text.slice(lastIndex);
+	const openIdx = tail.search(/<think>/i);
+	const closeIdx = tail.search(/<\/think>/i);
+	if (closeIdx !== -1 && (openIdx === -1 || closeIdx < openIdx)) {
+		// Orphan close: the opening tag was consumed upstream — reasoning up to the close.
+		reasoning.push(tail.slice(0, closeIdx));
+		answer += tail.slice(closeIdx + '</think>'.length);
+	} else if (openIdx !== -1) {
+		// Dangling open (truncated or still streaming): everything after it is reasoning.
+		answer += tail.slice(0, openIdx);
+		reasoning.push(tail.slice(openIdx + '<think>'.length));
+	} else {
+		answer += tail;
+	}
+	return { answer: answer.trim(), reasoning: reasoning.join('\n').trim() };
+}
+
+/** Remove reasoning-model "thinking" blocks from a response, keeping only the answer. */
+export function stripThink(text: string): string {
+	return splitReasoning(text).answer;
+}
+
+/** How hard a reasoning model should think before answering (OpenAI-style effort ladder). */
+export type ReasoningLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * Map a reasoning level to the extra chat-request params and the token headroom to
+ * add on top of a call's answer budget. `off` disables thinking (Qwen3's
+ * `enable_thinking:false`); the effort levels enable thinking, pass `reasoning_effort`
+ * for servers that honor it, and reserve room so the reasoning never eats the answer.
+ * Unknown params are ignored by servers that don't use them, so this is safe to send
+ * to any OpenAI-compatible endpoint.
+ */
+export function reasoningParams(level: ReasoningLevel): { params: Record<string, unknown>; headroom: number } {
+	if (level === 'off') {
+		return { params: { chat_template_kwargs: { enable_thinking: false } }, headroom: 0 };
+	}
+	const headroom: Record<Exclude<ReasoningLevel, 'off'>, number> = {
+		low: 2048,
+		medium: 4096,
+		high: 8192,
+		xhigh: 16384,
+		max: 32768,
+	};
+	return {
+		params: { chat_template_kwargs: { enable_thinking: true }, reasoning_effort: level },
+		headroom: headroom[level] ?? 4096,
+	};
+}
+
 /** Remove a leading ```markdown / ``` fence the model sometimes wraps output in. */
 export function stripCodeFences(text: string): string {
 	const trimmed = text.trim();

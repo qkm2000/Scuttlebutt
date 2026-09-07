@@ -39,10 +39,14 @@ import {
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
+	reasoningParams,
+	ReasoningLevel,
 	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
+	splitReasoning,
 	stripCodeFences,
+	stripThink,
 	structureSummary,
 	todayStamp,
 	truncate,
@@ -56,6 +60,12 @@ import {
 interface ModelOption {
 	id: string;
 	name: string;
+}
+
+/** A cached audio input device, persisted so the picker survives a reload without re-detecting. */
+interface AudioInput {
+	deviceId: string;
+	label: string;
 }
 
 interface ScuttlebuttSettings {
@@ -74,6 +84,8 @@ interface ScuttlebuttSettings {
 	llmModel: string;
 	llmModels: ModelOption[];
 	llmTimeout: number; // seconds; 0 = wait indefinitely
+	reasoningEffort: ReasoningLevel; // 'off' disables model thinking; effort levels enable it
+	streamSummary: boolean; // stream the summary token-by-token into the review pane
 
 	// Prompts / language
 	summaryPrompt: string;
@@ -83,6 +95,7 @@ interface ScuttlebuttSettings {
 	captureSystemAudio: boolean;
 	inputDeviceId: string;
 	systemAudioDeviceId: string; // optional loopback input mixed in alongside the mic
+	audioDevices: AudioInput[]; // cached device list so the pickers survive a reload
 
 	// Output
 	notesFolder: string;
@@ -132,13 +145,15 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	sttModels: [],
 	sttLanguage: 'en',
 	sttDiarize: false,
-	sttTimeout: 180,
+	sttTimeout: 300,
 
 	llmEndpoint: 'http://localhost:8000/v1',
 	llmApiKey: '',
 	llmModel: '',
 	llmModels: [],
-	llmTimeout: 120,
+	llmTimeout: 300,
+	reasoningEffort: 'off',
+	streamSummary: true,
 
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	language: 'English',
@@ -146,6 +161,7 @@ const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	captureSystemAudio: false,
 	inputDeviceId: '',
 	systemAudioDeviceId: '',
+	audioDevices: [],
 
 	notesFolder: 'Scuttlebutt/Notes',
 	audioFolder: 'Scuttlebutt/Audio',
@@ -486,27 +502,41 @@ class AIService {
 		return { text: parseTranscriptResponse(resp.text), hasSpeakers: responseHasSpeakers(resp.text) };
 	}
 
-	private async chat(
+	/** Reasoning params + JSON headers + budget for a chat call. Shared by all chat paths. */
+	private chatEnvelope(maxTokens: number, reasoning?: ReasoningLevel) {
+		this.ensureLlm();
+		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+		if (this.settings.llmApiKey) headers['Authorization'] = 'Bearer ' + this.settings.llmApiKey;
+		// Reasoning models (e.g. Qwen3) emit a <think> block that eats the token budget.
+		// `reasoningParams` disables thinking when off, and otherwise reserves headroom so
+		// the reasoning never starves the answer — critical for the tiny title/tag budgets.
+		// A per-run level (from the sidebar) overrides the global setting when given.
+		const { params, headroom } = reasoningParams(reasoning ?? this.settings.reasoningEffort ?? 'off');
+		return { url: joinUrl(this.settings.llmEndpoint, 'chat/completions'), headers, params, maxTokens: maxTokens + headroom };
+	}
+
+	/** One-shot chat completion. Returns the raw answer content and any separate reasoning. */
+	private async chatRaw(
 		system: string,
 		user: string,
 		maxTokens: number,
 		temperature: number,
-		signal?: AbortSignal
-	): Promise<string> {
-		this.ensureLlm();
-		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-		if (this.settings.llmApiKey) headers['Authorization'] = 'Bearer ' + this.settings.llmApiKey;
+		signal?: AbortSignal,
+		reasoning?: ReasoningLevel
+	): Promise<{ content: string; reasoning: string }> {
+		const env = this.chatEnvelope(maxTokens, reasoning);
 		const resp = await this.request(
-			joinUrl(this.settings.llmEndpoint, 'chat/completions'),
-			headers,
+			env.url,
+			env.headers,
 			JSON.stringify({
 				model: this.settings.llmModel,
 				messages: [
 					{ role: 'system', content: system },
 					{ role: 'user', content: user },
 				],
-				max_tokens: maxTokens,
+				max_tokens: env.maxTokens,
 				temperature,
+				...env.params,
 			}),
 			this.settings.llmTimeout * 1000,
 			'Summary',
@@ -521,7 +551,130 @@ class AIService {
 		} catch {
 			throw new Error('LLM endpoint returned a non-JSON response.');
 		}
-		return String(data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '').trim();
+		const msg = data.choices?.[0]?.message ?? {};
+		const content = String(msg.content ?? data.choices?.[0]?.text ?? '');
+		const reasoningField = String(msg.reasoning_content ?? msg.reasoning ?? '');
+		return { content, reasoning: reasoningField };
+	}
+
+	/** One-shot chat that returns only the answer (thinking stripped). For title/tags. */
+	private async chat(
+		system: string,
+		user: string,
+		maxTokens: number,
+		temperature: number,
+		signal?: AbortSignal,
+		reasoning?: ReasoningLevel
+	): Promise<string> {
+		const raw = await this.chatRaw(system, user, maxTokens, temperature, signal, reasoning);
+		return stripThink(raw.content);
+	}
+
+	/**
+	 * Streaming chat completion (SSE). Calls `onDelta(answer, reasoning)` as tokens arrive,
+	 * routing `<think>` / `reasoning_content` into the reasoning stream and the rest into the
+	 * answer. Uses fetch, so it can't fall back to requestUrl — the caller falls back to a
+	 * one-shot request on a non-abort/timeout failure (e.g. a server without CORS).
+	 */
+	private async chatStream(
+		system: string,
+		user: string,
+		maxTokens: number,
+		temperature: number,
+		onDelta: (answer: string, reasoning: string) => void,
+		signal?: AbortSignal,
+		reasoning?: ReasoningLevel
+	): Promise<{ answer: string; reasoning: string }> {
+		const env = this.chatEnvelope(maxTokens, reasoning);
+		const headers = { ...env.headers, Accept: 'text/event-stream' };
+		const controller = new AbortController();
+		const onExternalAbort = () => controller.abort();
+		if (signal) {
+			if (signal.aborted) controller.abort();
+			else signal.addEventListener('abort', onExternalAbort, { once: true });
+		}
+		const timeoutMs = this.settings.llmTimeout * 1000;
+		let timedOut = false;
+		const timer =
+			timeoutMs > 0
+				? window.setTimeout(() => {
+						timedOut = true;
+						controller.abort();
+				  }, timeoutMs)
+				: null;
+
+		let contentRaw = '';
+		let reasoningField = '';
+		const combined = () => {
+			const split = splitReasoning(contentRaw);
+			const reasoning = [reasoningField.trim(), split.reasoning].filter(Boolean).join('\n').trim();
+			return { answer: split.answer, reasoning };
+		};
+
+		try {
+			const resp = await fetch(env.url, {
+				method: 'POST',
+				headers,
+				body: JSON.stringify({
+					model: this.settings.llmModel,
+					messages: [
+						{ role: 'system', content: system },
+						{ role: 'user', content: user },
+					],
+					max_tokens: env.maxTokens,
+					temperature,
+					stream: true,
+					...env.params,
+				}),
+				signal: controller.signal,
+			});
+			if (!resp.ok) {
+				const errText = await resp.text().catch(() => '');
+				throw new Error(`LLM request failed (HTTP ${resp.status}): ${truncate(errText, 200)}`);
+			}
+			if (!resp.body) throw new Error('Streaming not supported by this response.');
+
+			const reader = resp.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				let nl: number;
+				while ((nl = buffer.indexOf('\n')) !== -1) {
+					const line = buffer.slice(0, nl).replace(/\r$/, '').trim();
+					buffer = buffer.slice(nl + 1);
+					if (!line.startsWith('data:')) continue;
+					const data = line.slice(5).trim();
+					if (data === '[DONE]') continue;
+					try {
+						const json = JSON.parse(data);
+						const delta = json.choices?.[0]?.delta ?? {};
+						if (typeof delta.content === 'string') contentRaw += delta.content;
+						if (typeof delta.reasoning_content === 'string') reasoningField += delta.reasoning_content;
+						else if (typeof delta.reasoning === 'string') reasoningField += delta.reasoning;
+					} catch {
+						/* keep-alive or partial JSON — ignore */
+					}
+				}
+				const c = combined();
+				onDelta(c.answer, c.reasoning);
+			}
+			const c = combined();
+			// A server that ignored `stream:true` sends no SSE `data:` lines, leaving us with
+			// nothing — signal the caller to fall back to a one-shot request.
+			if (!c.answer && !c.reasoning) throw new Error('No streamed content received.');
+			onDelta(c.answer, c.reasoning);
+			return c;
+		} catch (err: any) {
+			if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+			if (timedOut) throw new Error(`Summary timed out after ${Math.round(timeoutMs / 1000)}s`);
+			throw err;
+		} finally {
+			if (timer !== null) window.clearTimeout(timer);
+			if (signal) signal.removeEventListener('abort', onExternalAbort);
+		}
 	}
 
 	async summarize(
@@ -531,8 +684,13 @@ class AIService {
 			participants: string;
 			contextDocs: { path: string; content: string }[];
 		},
-		signal?: AbortSignal
-	): Promise<string> {
+		opts: {
+			signal?: AbortSignal;
+			reasoning?: ReasoningLevel;
+			/** When given, stream the summary and call this as tokens arrive. */
+			onDelta?: (answer: string, reasoning: string) => void;
+		} = {}
+	): Promise<{ summary: string; reasoning: string }> {
 		const system = this.settings.summaryPrompt.replace(/\{\{\s*language\s*\}\}/g, this.settings.language || 'English');
 		const parts: string[] = [];
 		parts.push('# Context');
@@ -551,12 +709,27 @@ class AIService {
 		}
 		parts.push('\n# Transcript');
 		parts.push(input.transcript.trim() || '(empty)');
+		const user = parts.join('\n');
 
-		const summary = await this.chat(system, parts.join('\n'), 8192, 0.3, signal);
-		return stripCodeFences(summary);
+		if (opts.onDelta) {
+			try {
+				const r = await this.chatStream(system, user, 8192, 0.3, opts.onDelta, opts.signal, opts.reasoning);
+				return { summary: stripCodeFences(r.answer), reasoning: r.reasoning };
+			} catch (err: any) {
+				// A cancel or timeout is terminal; anything else (e.g. a server without CORS
+				// that can't stream over fetch) falls back to a one-shot request.
+				if (err?.name === 'AbortError' || opts.signal?.aborted) throw err;
+				if (/timed out/i.test(err?.message ?? '')) throw err;
+				console.warn('Scuttlebutt: streaming failed, falling back to a one-shot request', err);
+			}
+		}
+		const raw = await this.chatRaw(system, user, 8192, 0.3, opts.signal, opts.reasoning);
+		const split = splitReasoning(raw.content);
+		const reasoning = [raw.reasoning.trim(), split.reasoning].filter(Boolean).join('\n').trim();
+		return { summary: stripCodeFences(split.answer), reasoning };
 	}
 
-	async generateTitle(content: string, signal?: AbortSignal): Promise<string> {
+	async generateTitle(content: string, signal?: AbortSignal, reasoning?: ReasoningLevel): Promise<string> {
 		const language = this.settings.language || 'English';
 		const system =
 			`Current date: ${todayStamp(new Date())}\n\n` +
@@ -566,7 +739,7 @@ class AIService {
 			`- Never ask questions or request more information.\n` +
 			`- If the note is empty or has no meaningful content, output exactly: <EMPTY>`;
 		const user = `<note>\n${content}\n</note>\n\nNow, give me a SUPER CONCISE title for the above note. Only about the topic of the meeting.`;
-		const out = (await this.chat(system, user, 64, 0.3, signal)).trim();
+		const out = (await this.chat(system, user, 64, 0.3, signal, reasoning)).trim();
 		if (!out || out === '<EMPTY>') return '';
 		return sanitizeTitle(out);
 	}
@@ -575,7 +748,8 @@ class AIService {
 		title: string,
 		content: string,
 		historicalTags: string[],
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		reasoning?: ReasoningLevel
 	): Promise<string[]> {
 		const defaults = this.settings.defaultTags.join(', ');
 		const system =
@@ -596,7 +770,7 @@ class AIService {
 				? `## Existing tags in the vault (reuse these when they fit)\n${historicalTags.join(', ')}\n\n`
 				: '## Existing tags in the vault\n(none yet)\n\n';
 		const user = `${existing}## Note\n\n**Title:** ${title || '(untitled)'}\n\n**Content:**\n${content}`;
-		const out = await this.chat(system, user, 128, 0.4, signal);
+		const out = await this.chat(system, user, 128, 0.4, signal, reasoning);
 		const tags = parseTagArray(out)
 			.map(normalizeTag)
 			.filter((t) => t.length > 0);
@@ -642,6 +816,9 @@ interface MeetingSession {
 	participants: string[];
 	contextFiles: string[];
 	diarize: boolean; // per-recording speaker identification (defaults from settings)
+	reasoningEffort: ReasoningLevel; // per-run LLM thinking level (defaults from settings)
+	stream: boolean; // per-run: stream the summary as it generates (defaults from settings)
+	reasoning: string; // captured model "thinking" for the summary, shown in review only
 	summary: string;
 	title: string;
 	tags: string[];
@@ -655,7 +832,11 @@ interface MeetingSession {
 	savedNotePath: string | null;
 }
 
-function newSession(diarizeDefault = false): MeetingSession {
+function newSession(
+	diarizeDefault = false,
+	reasoningDefault: ReasoningLevel = 'off',
+	streamDefault = true
+): MeetingSession {
 	return {
 		status: 'idle',
 		audioData: null,
@@ -667,6 +848,9 @@ function newSession(diarizeDefault = false): MeetingSession {
 		participants: [],
 		contextFiles: [],
 		diarize: diarizeDefault,
+		reasoningEffort: reasoningDefault,
+		stream: streamDefault,
+		reasoning: '',
 		summary: '',
 		title: '',
 		tags: [],
@@ -717,6 +901,12 @@ class ScuttlebuttView extends ItemView {
 	private timer: number | null = null;
 	private timerEl: HTMLElement | null = null;
 	private audioUrl: string | null = null;
+	// Disclosure state, kept across re-renders (both collapsed by default).
+	private runOptionsOpen = false;
+	private reasoningOpen = false;
+	// Live targets for a streaming summary, updated in place without a full re-render.
+	private streamSummaryEl: HTMLTextAreaElement | null = null;
+	private streamReasoningEl: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: ScuttlebuttPlugin) {
 		super(leaf);
@@ -778,6 +968,8 @@ class ScuttlebuttView extends ItemView {
 		this.stopTimer();
 		this.revokeAudioUrl();
 		this.timerEl = null;
+		this.streamSummaryEl = null;
+		this.streamReasoningEl = null;
 		const root = this.contentEl;
 		root.empty();
 		root.addClass('mh-root');
@@ -882,18 +1074,7 @@ class ScuttlebuttView extends ItemView {
 		diskBtn.disabled = recording || busy;
 		diskBtn.onclick = () => this.uploadAudioFromDisk();
 
-		// Per-recording speaker identification, seeded from the global default. Flipping
-		// this after a transcript exists takes effect on the next (Re-)transcribe.
-		const diarRow = card.createDiv('mh-diar-row');
-		const diarToggle = diarRow.createEl('label', { cls: 'mh-diar' });
-		const diarCb = diarToggle.createEl('input', { attr: { type: 'checkbox' } });
-		diarCb.checked = s.diarize;
-		diarCb.disabled = recording || busy;
-		setIcon(diarToggle.createSpan('mh-diar-icon'), 'users');
-		diarToggle.createSpan({ text: 'Identify speakers' });
-		diarCb.onchange = () => {
-			s.diarize = diarCb.checked;
-		};
+		this.renderRunOptions(card, recording || busy);
 
 		if (s.audioName && s.status !== 'recording') {
 			const clip = card.createDiv('mh-clip');
@@ -910,6 +1091,72 @@ class ScuttlebuttView extends ItemView {
 				player.src = this.audioUrl;
 			}
 		}
+	}
+
+	/**
+	 * Collapsible per-recording run options (speakers · thinking · streaming).
+	 * A new session (from "New", a recording, or an import) seeds these from the global
+	 * settings; after that they stick until the next "New", so choices made here aren't lost
+	 * when a recording starts. The disclosure is collapsed by default.
+	 */
+	private renderRunOptions(card: HTMLElement, disabled: boolean): void {
+		const s = this.s;
+
+		const det = card.createEl('details', { cls: 'mh-runopts' });
+		det.open = this.runOptionsOpen;
+		det.ontoggle = () => {
+			this.runOptionsOpen = det.open;
+		};
+		const summary = det.createEl('summary', { cls: 'mh-runopts-summary' });
+		setIcon(summary.createSpan('mh-diar-icon'), 'sliders-horizontal');
+		summary.createSpan({ text: 'Run options' });
+
+		const bodyEl = det.createDiv('mh-runopts-body');
+
+		// Checkboxes grouped together.
+		const checks = bodyEl.createDiv('mh-runopts-group');
+
+		const diarToggle = checks.createEl('label', { cls: 'mh-diar' });
+		const diarCb = diarToggle.createEl('input', { attr: { type: 'checkbox' } });
+		diarCb.checked = s.diarize;
+		diarCb.disabled = disabled;
+		setIcon(diarToggle.createSpan('mh-diar-icon'), 'users');
+		diarToggle.createSpan({ text: 'Identify speakers' });
+		diarCb.onchange = () => {
+			s.diarize = diarCb.checked;
+		};
+
+		const streamToggle = checks.createEl('label', { cls: 'mh-diar' });
+		const streamCb = streamToggle.createEl('input', { attr: { type: 'checkbox' } });
+		streamCb.checked = s.stream;
+		streamCb.disabled = disabled;
+		setIcon(streamToggle.createSpan('mh-diar-icon'), 'zap');
+		streamToggle.createSpan({ text: 'Stream summary' });
+		streamCb.onchange = () => {
+			s.stream = streamCb.checked;
+		};
+
+		// Dropdowns grouped together.
+		const selects = bodyEl.createDiv('mh-runopts-group');
+
+		const thinkTag = selects.createDiv('mh-diar');
+		setIcon(thinkTag.createSpan('mh-diar-icon'), 'brain');
+		thinkTag.createSpan({ text: 'Thinking' });
+		const thinkSel = thinkTag.createEl('select', { cls: 'mh-think-select' });
+		const THINK_OPTIONS: [ReasoningLevel, string][] = [
+			['off', 'Off'],
+			['low', 'Low'],
+			['medium', 'Medium'],
+			['high', 'High'],
+			['xhigh', 'Extra high'],
+			['max', 'Max'],
+		];
+		for (const [val, label] of THINK_OPTIONS) thinkSel.createEl('option', { value: val, text: label });
+		thinkSel.value = s.reasoningEffort;
+		thinkSel.disabled = disabled;
+		thinkSel.onchange = () => {
+			s.reasoningEffort = thinkSel.value as ReasoningLevel;
+		};
 	}
 
 	private renderEmpty(root: HTMLElement): void {
@@ -937,9 +1184,19 @@ class ScuttlebuttView extends ItemView {
 	private renderMeta(root: HTMLElement): void {
 		const s = this.s;
 		const meta = root.createDiv('mh-meta');
+		const busy = s.status === 'summarizing' || s.status === 'transcribing';
+		const canGenerate = !!(s.summary || s.transcript);
 
 		const titleField = meta.createDiv('mh-field');
-		titleField.createEl('label', { text: 'Title', cls: 'mh-label' });
+		const titleHead = titleField.createDiv('mh-label-row');
+		titleHead.createEl('label', { text: 'Title', cls: 'mh-label' });
+		const titleRegen = titleHead.createEl('button', {
+			cls: 'mh-icon-btn',
+			attr: { 'aria-label': 'Regenerate title', title: 'Regenerate title' },
+		});
+		setIcon(titleRegen.createSpan(), 'refresh-cw');
+		titleRegen.disabled = busy || !canGenerate;
+		titleRegen.onclick = () => this.plugin.regenerateTitle();
 		const titleInput = titleField.createEl('input', {
 			cls: 'mh-input',
 			attr: { type: 'text', placeholder: 'Untitled meeting' },
@@ -978,7 +1235,15 @@ class ScuttlebuttView extends ItemView {
 		};
 
 		const tagsField = meta.createDiv('mh-field');
-		tagsField.createEl('label', { text: 'Tags', cls: 'mh-label' });
+		const tagsHead = tagsField.createDiv('mh-label-row');
+		tagsHead.createEl('label', { text: 'Tags', cls: 'mh-label' });
+		const tagsRegen = tagsHead.createEl('button', {
+			cls: 'mh-icon-btn',
+			attr: { 'aria-label': 'Regenerate tags', title: 'Regenerate tags' },
+		});
+		setIcon(tagsRegen.createSpan(), 'refresh-cw');
+		tagsRegen.disabled = busy || !canGenerate;
+		tagsRegen.onclick = () => this.plugin.regenerateTags();
 		const tagsWrap = tagsField.createDiv('mh-tags');
 		for (const tag of s.tags) {
 			const chip = tagsWrap.createSpan('mh-tag');
@@ -1064,6 +1329,8 @@ class ScuttlebuttView extends ItemView {
 
 	private renderSummaryTab(body: HTMLElement): void {
 		const s = this.s;
+		const streaming = s.status === 'summarizing' && s.stream;
+
 		const bar = body.createDiv('mh-tab-bar');
 		const regen = bar.createEl('button', { cls: 'mh-mini-btn' });
 		setIcon(regen.createSpan(), 'refresh-cw');
@@ -1071,7 +1338,8 @@ class ScuttlebuttView extends ItemView {
 		regen.disabled = !s.transcript || s.status === 'summarizing' || s.status === 'transcribing';
 		regen.onclick = () => this.plugin.regenerateSummary();
 
-		if (s.summary) {
+		// Preview/edit toggle isn't meaningful mid-stream.
+		if (s.summary && !streaming) {
 			const toggle = bar.createEl('button', { cls: 'mh-mini-btn' });
 			setIcon(toggle.createSpan(), s.previewSummary ? 'pencil' : 'eye');
 			toggle.createSpan({ text: s.previewSummary ? 'Edit' : 'Preview' });
@@ -1081,7 +1349,15 @@ class ScuttlebuttView extends ItemView {
 			};
 		}
 
-		if (s.previewSummary && s.summary) {
+		if (streaming) {
+			const area = body.createEl('textarea', {
+				cls: 'mh-textarea',
+				attr: { placeholder: 'Summarizing…', readonly: 'true' },
+			});
+			area.value = s.summary;
+			this.streamSummaryEl = area;
+			this.bindStreamScroll(area);
+		} else if (s.previewSummary && s.summary) {
 			const preview = body.createDiv('mh-markdown');
 			MarkdownRenderer.render(this.app, s.summary, preview, '', this as Component);
 		} else {
@@ -1092,6 +1368,81 @@ class ScuttlebuttView extends ItemView {
 			area.value = s.summary;
 			area.oninput = () => (s.summary = area.value);
 		}
+
+		this.renderReasoning(body, streaming);
+	}
+
+	/** Collapsible "Model thinking" section — shown only when there's reasoning to show. */
+	private renderReasoning(body: HTMLElement, streaming: boolean): void {
+		const s = this.s;
+		const show = !!s.reasoning || (streaming && s.reasoningEffort !== 'off');
+		if (!show) return;
+		const det = body.createEl('details', { cls: 'mh-reasoning' });
+		det.open = this.reasoningOpen;
+		det.ontoggle = () => {
+			this.reasoningOpen = det.open;
+		};
+		const summary = det.createEl('summary', { cls: 'mh-reasoning-summary' });
+		setIcon(summary.createSpan('mh-diar-icon'), 'brain');
+		summary.createSpan({ text: 'Model thinking' });
+		const content = det.createEl('pre', { cls: 'mh-reasoning-body' });
+		content.setText(s.reasoning || (streaming ? 'Thinking…' : ''));
+		this.streamReasoningEl = content;
+		this.bindStreamScroll(content);
+	}
+
+	/** Update the streaming summary/reasoning in place, without a full re-render. */
+	updateStreaming(): void {
+		const s = this.s;
+		if (this.streamSummaryEl) {
+			this.writeStreaming(this.streamSummaryEl, s.summary);
+		}
+		if (s.reasoning) {
+			if (!this.streamReasoningEl) {
+				// Reasoning started arriving after the first paint — do one full render so the
+				// disclosure appears, then subsequent deltas update it in place.
+				this.render();
+				return;
+			}
+			this.writeStreaming(this.streamReasoningEl, s.reasoning);
+		}
+	}
+
+	// How far from the bottom (px) still counts as "following" the stream.
+	private static readonly STREAM_STICK_PX = 48;
+
+	/**
+	 * Follow the stream only while the user is at the bottom. Whether we're "stuck" is decided
+	 * from the ACTUAL scroll position at write time (not just an event flag), so a scroll-up
+	 * during fast streaming detaches even if its scroll event hasn't been processed yet — no
+	 * tug-of-war with the autoscroll. When detached, the prior position is restored (writing a
+	 * textarea's `.value` can itself jump to the bottom).
+	 */
+	private writeStreaming(el: HTMLTextAreaElement | HTMLElement, text: string): void {
+		const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+		let stuck = (el as any)._stick !== false;
+		if (stuck && dist > ScuttlebuttView.STREAM_STICK_PX) {
+			stuck = false; // user has scrolled up — stop following
+			(el as any)._stick = false;
+		}
+		const prev = el.scrollTop;
+		if (el instanceof HTMLTextAreaElement) el.value = text;
+		else el.setText(text);
+		el.scrollTop = stuck ? el.scrollHeight : prev;
+	}
+
+	/**
+	 * Wire a streaming element's stick-to-bottom behaviour: an upward wheel detaches
+	 * immediately (any amount); scrolling back to the bottom re-attaches. Starts attached.
+	 */
+	private bindStreamScroll(el: HTMLElement): void {
+		(el as any)._stick = true;
+		el.addEventListener('wheel', (e: WheelEvent) => {
+			if (e.deltaY < 0) (el as any)._stick = false;
+		}, { passive: true });
+		el.addEventListener('scroll', () => {
+			if (el.scrollHeight - el.scrollTop - el.clientHeight < 4) (el as any)._stick = true;
+		});
 	}
 
 	private renderTranscriptTab(body: HTMLElement): void {
@@ -1228,6 +1579,11 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		// The initial session was field-initialised before settings loaded — seed its run
+		// options from the settings now so the first recording reflects the configured defaults.
+		this.session.diarize = this.settings.sttDiarize;
+		this.session.reasoningEffort = this.settings.reasoningEffort;
+		this.session.stream = this.settings.streamSummary;
 
 		this.registerView(VIEW_TYPE_SCUTTLEBUTT, (leaf) => new ScuttlebuttView(leaf, this));
 		this.addRibbonIcon('mic', 'Scuttlebutt', () => this.activateView());
@@ -1311,6 +1667,21 @@ export default class ScuttlebuttPlugin extends Plugin {
 		for (const view of this.getViews()) view.render();
 	}
 
+	/**
+	 * A new empty session that inherits the current session's run options (speakers /
+	 * thinking / streaming). Used when a recording or import begins, so choices made after
+	 * "New" persist into the run instead of being reset to the global defaults.
+	 */
+	private freshSession(): MeetingSession {
+		const s = this.session;
+		return newSession(s.diarize, s.reasoningEffort, s.stream);
+	}
+
+	/** Push streaming summary/reasoning into open views in place (no full re-render). */
+	private updateStreamingViews(): void {
+		for (const view of this.getViews()) view.updateStreaming();
+	}
+
 	private setStatus(status: SessionStatus): void {
 		this.session.status = status;
 	}
@@ -1358,7 +1729,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 				8000
 			);
 		}
-		this.session = newSession(this.settings.sttDiarize);
+		this.session = this.freshSession();
 		this.session.startedAt = Date.now();
 		this.setStatus('recording');
 		this.startStatusBarTimer();
@@ -1392,7 +1763,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async importFromVault(file: TFile): Promise<void> {
 		try {
 			const data = await this.app.vault.readBinary(file);
-			this.session = newSession(this.settings.sttDiarize);
+			this.session = this.freshSession();
 			this.session.audioData = data;
 			this.session.audioMime = this.mimeForExtension(file.extension);
 			this.session.audioName = file.name;
@@ -1408,7 +1779,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async importFromDisk(file: File): Promise<void> {
 		try {
 			const data = await file.arrayBuffer();
-			this.session = newSession(this.settings.sttDiarize);
+			this.session = this.freshSession();
 			this.session.audioData = data;
 			this.session.audioMime = file.type || this.mimeForExtension(file.name.split('.').pop() ?? '');
 			this.session.audioName = file.name;
@@ -1543,9 +1914,58 @@ export default class ScuttlebuttPlugin extends Plugin {
 		await this.summarizeInternal();
 	}
 
+	/** Regenerate just the title (or just the tags) from the current summary/transcript. */
+	async regenerateTitle(): Promise<void> {
+		await this.regeneratePiece('title');
+	}
+
+	async regenerateTags(): Promise<void> {
+		await this.regeneratePiece('tags');
+	}
+
+	private async regeneratePiece(piece: 'title' | 'tags'): Promise<void> {
+		const s = this.session;
+		const basis = s.summary || s.transcript;
+		if (!basis.trim()) {
+			new Notice('Summarize or transcribe first.');
+			return;
+		}
+		if (s.status === 'summarizing' || s.status === 'transcribing') return;
+		this.cancelled = false;
+		const controller = new AbortController();
+		this.activeController = controller;
+		this.setStatus('summarizing');
+		this.setProgress(piece === 'title' ? 'Naming…' : 'Tagging…', 80);
+		this.refreshViews();
+		try {
+			if (piece === 'title') {
+				s.title = await this.ai.generateTitle(basis, controller.signal, s.reasoningEffort);
+			} else {
+				s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags(), controller.signal, s.reasoningEffort);
+			}
+			this.setStatus('ready');
+			this.setProgress(piece === 'title' ? 'Title updated.' : 'Tags updated.', 100);
+			this.refreshViews();
+			window.setTimeout(() => this.clearProgressIfIdle(), 3000);
+		} catch (err: any) {
+			if (this.cancelled) {
+				this.finishCancelled();
+				return;
+			}
+			this.setStatus(s.summary ? 'ready' : 'recorded');
+			this.setProgress('', 0);
+			this.refreshViews();
+			new Notice(`${piece === 'title' ? 'Title' : 'Tag'} generation failed: ${err?.message ?? err}`);
+		} finally {
+			this.activeController = null;
+		}
+	}
+
 	private async summarizeInternal(): Promise<void> {
 		const s = this.session;
 		s.error = null;
+		s.summary = '';
+		s.reasoning = '';
 		this.setStatus('summarizing');
 		this.setProgress('Summarizing…', 60);
 		s.activeTab = 'summary';
@@ -1558,15 +1978,27 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.activeController = controller;
 		try {
 			try {
-				s.summary = await this.ai.summarize(
+				const result = await this.ai.summarize(
 					{
 						transcript: s.transcript,
 						memo: s.memo,
 						participants: s.participants.join(', '),
 						contextDocs,
 					},
-					controller.signal
+					{
+						signal: controller.signal,
+						reasoning: s.reasoningEffort,
+						onDelta: s.stream
+							? (answer, reasoning) => {
+									s.summary = answer;
+									s.reasoning = reasoning;
+									this.updateStreamingViews();
+							  }
+							: undefined,
+					}
 				);
+				s.summary = result.summary;
+				s.reasoning = result.reasoning;
 			} catch (err: any) {
 				if (this.cancelled) {
 					this.finishCancelled();
@@ -1588,7 +2020,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 			if (this.settings.generateTitle && !s.title.trim()) {
 				try {
-					s.title = await this.ai.generateTitle(basis, controller.signal);
+					s.title = await this.ai.generateTitle(basis, controller.signal, s.reasoningEffort);
 				} catch (err) {
 					if (this.cancelled) {
 						this.finishCancelled();
@@ -1599,7 +2031,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			}
 			if (this.settings.generateTags && s.tags.length === 0) {
 				try {
-					s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags(), controller.signal);
+					s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags(), controller.signal, s.reasoningEffort);
 				} catch (err) {
 					if (this.cancelled) {
 						this.finishCancelled();
@@ -1764,7 +2196,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 	resetSession(): void {
 		if (this.recorder.isRecording()) this.recorder.abort();
 		this.stopStatusBarTimer();
-		this.session = newSession(this.settings.sttDiarize);
+		this.session = newSession(this.settings.sttDiarize, this.settings.reasoningEffort, this.settings.streamSummary);
 		this.refreshViews();
 	}
 
@@ -1835,7 +2267,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 // ---------------------------------------------------------------------------
 
 class ScuttlebuttSettingTab extends PluginSettingTab {
-	private audioInputs: MediaDeviceInfo[] = [];
+	private audioInputs: AudioInput[] = [];
 	private deviceDropdown: DropdownComponent | null = null;
 	private systemDeviceDropdown: DropdownComponent | null = null;
 
@@ -1853,7 +2285,13 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 		}
 		try {
 			const devices = await navigator.mediaDevices.enumerateDevices();
-			this.audioInputs = devices.filter((d) => d.kind === 'audioinput');
+			this.audioInputs = devices
+				.filter((d) => d.kind === 'audioinput')
+				.map((d) => ({ deviceId: d.deviceId, label: d.label }));
+			// Cache the list so the pickers show the saved selection after a reload,
+			// without the user having to re-detect every time.
+			this.plugin.settings.audioDevices = this.audioInputs;
+			await this.plugin.saveSettings();
 			new Notice(`Found ${this.audioInputs.length} input device${this.audioInputs.length === 1 ? '' : 's'}.`);
 		} catch {
 			this.audioInputs = [];
@@ -1886,6 +2324,10 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		containerEl.addClass('mh-settings');
+
+		// Seed the device pickers from the cached list so the saved input/system devices
+		// show immediately on open, even before (or without) a fresh detect.
+		if (this.audioInputs.length === 0) this.audioInputs = this.plugin.settings.audioDevices ?? [];
 
 		this.endpointSection(containerEl, {
 			heading: 'Transcription',
@@ -1930,6 +2372,42 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 			modelsKey: 'llmModels',
 			timeoutKey: 'llmTimeout',
 		});
+
+		new Setting(containerEl)
+			.setName('Reasoning effort')
+			.setDesc(
+				'How hard a thinking model (e.g. Qwen3) reasons before answering. "Off" disables thinking — ' +
+					'recommended for summaries, and required for models that would otherwise burn the whole ' +
+					'token budget on <think>. Higher levels enable thinking and reserve more room for it; ' +
+					'servers that support reasoning_effort (OpenAI-style) use the exact level.'
+			)
+			.addDropdown((d) => {
+				d.addOption('off', 'Off (no thinking)');
+				d.addOption('low', 'Low');
+				d.addOption('medium', 'Medium');
+				d.addOption('high', 'High');
+				d.addOption('xhigh', 'Extra high');
+				d.addOption('max', 'Max');
+				d.setValue(this.plugin.settings.reasoningEffort ?? 'off');
+				d.onChange(async (v) => {
+					this.plugin.settings.reasoningEffort = v as ReasoningLevel;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Stream summary')
+			.setDesc(
+				'Show the summary as it generates, token by token, instead of waiting for the whole ' +
+					'thing. Falls back to a single request on servers that can\'t stream. Model thinking, ' +
+					'when enabled, streams into a separate collapsible section.'
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.streamSummary).onChange(async (v) => {
+					this.plugin.settings.streamSummary = v;
+					await this.plugin.saveSettings();
+				})
+			);
 
 		new Setting(containerEl).setName('Capture').setHeading();
 

@@ -10,10 +10,13 @@ import {
 	normalizeTag,
 	parseTagArray,
 	parseTranscriptResponse,
+	reasoningParams,
 	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
+	splitReasoning,
 	stripCodeFences,
+	stripThink,
 	structureSummary,
 	todayStamp,
 	truncate,
@@ -71,6 +74,46 @@ test('stripCodeFences unwraps a fenced block, leaves plain text alone', () => {
 	assert.equal(stripCodeFences('```markdown\n# Hi\n```'), '# Hi');
 	assert.equal(stripCodeFences('```\nx\n```'), 'x');
 	assert.equal(stripCodeFences('# Hi\n- a'), '# Hi\n- a');
+});
+
+test('stripThink removes complete, truncated, and orphan-close think blocks', () => {
+	assert.equal(stripThink('<think>reasoning here</think>\n# Answer'), '# Answer');
+	assert.equal(stripThink('before <think>mid</think> after'), 'before  after');
+	// Truncated mid-think (no closing tag): the reasoning is dropped, leaving nothing.
+	assert.equal(stripThink('<think>still thinking and cut off'), '');
+	// Reasoning parser consumed the opening tag, leaving only the close.
+	assert.equal(stripThink('reasoning text</think>\nThe real answer'), 'The real answer');
+	// Plain content is untouched.
+	assert.equal(stripThink('# Just a summary\n- a'), '# Just a summary\n- a');
+});
+
+test('splitReasoning separates answer from thinking across all tag shapes', () => {
+	assert.deepEqual(splitReasoning('<think>hmm</think>\n# Answer'), { answer: '# Answer', reasoning: 'hmm' });
+	// Dangling open (still streaming / truncated): answer so far, rest is reasoning.
+	assert.deepEqual(splitReasoning('intro <think>still going'), { answer: 'intro', reasoning: 'still going' });
+	// Orphan close (parser consumed the open tag): before is reasoning, after is answer.
+	assert.deepEqual(splitReasoning('reasoning</think>real answer'), {
+		answer: 'real answer',
+		reasoning: 'reasoning',
+	});
+	// No tags at all.
+	assert.deepEqual(splitReasoning('just an answer'), { answer: 'just an answer', reasoning: '' });
+});
+
+test('reasoningParams disables thinking when off and reserves headroom otherwise', () => {
+	const off = reasoningParams('off');
+	assert.equal(off.headroom, 0);
+	assert.deepEqual(off.params, { chat_template_kwargs: { enable_thinking: false } });
+	assert.equal((off.params as any).reasoning_effort, undefined);
+
+	const high = reasoningParams('high');
+	assert.equal(high.headroom, 8192);
+	assert.equal((high.params as any).reasoning_effort, 'high');
+	assert.deepEqual((high.params as any).chat_template_kwargs, { enable_thinking: true });
+
+	// Headroom scales with the effort ladder.
+	assert.ok(reasoningParams('low').headroom < reasoningParams('max').headroom);
+	assert.equal(reasoningParams('max').headroom, 32768);
 });
 
 test('parseTagArray extracts arrays, even from surrounding prose', () => {

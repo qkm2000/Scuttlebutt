@@ -190,12 +190,148 @@
 	cursor: pointer;
 }
 
+.mh-think-select {
+	margin-left: 2px;
+	padding: 2px 4px;
+	font-size: var(--font-ui-smaller);
+	height: auto;
+	min-height: 0;
+	cursor: pointer;
+	/* Preferred width so the control doesn't resize as the selected level changes,
+	   but it may shrink to fit a narrow sidebar. */
+	width: 7.5rem;
+	max-width: 100%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .mh-diar-icon {
 	display: inline-flex;
 	color: var(--text-faint);
 }
 
 .mh-diar-icon svg {
+	width: 13px;
+	height: 13px;
+}
+
+/* Collapsible per-recording run options */
+.mh-runopts {
+	padding: 1px 2px;
+	font-size: var(--font-ui-smaller);
+}
+
+.mh-runopts-summary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	color: var(--text-muted);
+	user-select: none;
+	list-style: none;
+}
+
+.mh-runopts-summary::-webkit-details-marker {
+	display: none;
+}
+
+.mh-runopts-summary::before {
+	content: '▸';
+	color: var(--text-faint);
+	font-size: 0.9em;
+}
+
+.mh-runopts[open] .mh-runopts-summary::before {
+	content: '▾';
+}
+
+.mh-runopts-body {
+	padding: 4px 0 2px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.mh-runopts-group {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+/* Collapsible "Model thinking" section in the summary tab */
+.mh-reasoning {
+	margin-top: 8px;
+	font-size: var(--font-ui-smaller);
+}
+
+.mh-reasoning-summary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	color: var(--text-muted);
+	user-select: none;
+	list-style: none;
+}
+
+.mh-reasoning-summary::-webkit-details-marker {
+	display: none;
+}
+
+.mh-reasoning-summary::before {
+	content: '▸';
+	color: var(--text-faint);
+	font-size: 0.9em;
+}
+
+.mh-reasoning[open] .mh-reasoning-summary::before {
+	content: '▾';
+}
+
+.mh-reasoning-body {
+	margin: 6px 0 0;
+	padding: 8px;
+	max-height: 220px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+/* Label row with an inline regenerate button (title / tags) */
+.mh-label-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.mh-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+
+.mh-icon-btn:hover:not(:disabled) {
+	color: var(--text-normal);
+}
+
+.mh-icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.mh-icon-btn svg {
 	width: 13px;
 	height: 13px;
 }
@@ -666,7 +802,11 @@
    row. Without this, detecting input devices (or loading long model IDs) widens
    the native <select> to its longest option and pushes the layout. */
 .mh-settings .setting-item-control .dropdown {
-	max-width: 16rem;
+	/* A preferred width so the control doesn't resize as the selected option changes,
+	   but it may shrink to fit a narrow pane rather than squishing the setting label. */
+	width: 10rem;
+	max-width: 100%;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;

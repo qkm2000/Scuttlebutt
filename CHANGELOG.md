@@ -4,6 +4,42 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] — Loose Lips (2026-09-07)
+
+### Added
+
+- **Streaming summaries.** The summary now streams in token by token instead of
+  appearing all at once — far less waiting on slower local models. Toggle it in
+  Settings → Summary ("Stream summary", on by default) or per recording. Falls
+  back to a single request automatically on servers that can't stream.
+- **Model thinking, shown separately.** For reasoning models (e.g. Qwen3), the
+  `<think>` reasoning is captured and shown in a collapsible "Model thinking"
+  section under the summary — hidden by default, and streamed live when enabled.
+  It's never written into the saved note.
+- **Reasoning effort control.** A new "Reasoning effort" setting (Off / Low /
+  Medium / High / Extra high / Max), also available per recording. "Off" disables
+  thinking (recommended for summaries); higher levels enable it and reserve token
+  headroom so the reasoning never crowds out the answer.
+- **Regenerate title or tags on their own.** Small refresh buttons beside the
+  Title and Tags fields re-run just that piece from the current summary.
+- **Run options.** The per-recording controls (Identify speakers · Thinking ·
+  Stream summary) now live in one collapsible "Run options" section in the
+  sidebar. They seed from your settings and stick until you press "New".
+
+### Changed
+
+- Default request timeouts are now 300 s for both Transcription and Summary.
+- Dropdowns are a consistent fixed width that no longer resizes with the selected
+  option, and shrink to fit a narrow pane instead of squishing labels.
+- The input-device list is cached, so your selected devices show immediately after
+  a reload without having to re-detect them.
+
+### Fixed
+
+- **Thinking models no longer return a blank summary, title, and tags.** Models
+  like Qwen3 spent the whole token budget on `<think>` and returned nothing;
+  their reasoning is now stripped from the answer and given its own headroom.
+
 ## [1.0.3] — All Hands (2026-08-12)
 
 ### Added
