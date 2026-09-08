@@ -11,6 +11,7 @@ import {
 	parseTagArray,
 	parseTranscriptResponse,
 	reasoningParams,
+	recordedMs,
 	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
@@ -216,4 +217,23 @@ test('buildMultipart produces a well-formed body and boundary', () => {
 	assert.ok(decoded.includes('name="file"; filename="a.webm"'));
 	assert.ok(decoded.includes('Content-Type: audio/webm'));
 	assert.ok(decoded.includes(`--${boundary}--`));
+});
+
+test('recordedMs sums banked time and the live segment', () => {
+	assert.equal(recordedMs(0, 1000, 4000), 3000); // running: 3s into first segment
+	assert.equal(recordedMs(5000, 2000, 3000), 6000); // 5s banked + 1s live
+});
+
+test('recordedMs freezes while paused (null segment)', () => {
+	assert.equal(recordedMs(5000, null, 999999), 5000);
+	assert.equal(recordedMs(0, null, 999999), 0);
+});
+
+test('recordedMs handles multiple banked pauses', () => {
+	assert.equal(recordedMs(5000, 10000, 11500), 6500); // 5s banked + 1.5s live
+});
+
+test('recordedMs never goes negative on clock skew', () => {
+	assert.equal(recordedMs(0, 5000, 4000), 0); // now < segment start
+	assert.equal(recordedMs(1000, 5000, 4000), 1000); // banked kept, live clamped to 0
 });

@@ -27,6 +27,16 @@ export function formatDuration(ms: number): string {
 	return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/**
+ * Total recorded milliseconds: time banked from completed segments (`activeMs`)
+ * plus the current live segment (`now - segmentStartedAt`). While paused,
+ * `segmentStartedAt` is null and the value freezes at `activeMs`. Never negative.
+ */
+export function recordedMs(activeMs: number, segmentStartedAt: number | null, now: number): number {
+	const live = segmentStartedAt !== null ? Math.max(0, now - segmentStartedAt) : 0;
+	return activeMs + live;
+}
+
 /** Local-date stamp as YYYY-MM-DD. */
 export function todayStamp(d: Date): string {
 	const pad = (n: number) => n.toString().padStart(2, '0');
