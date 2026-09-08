@@ -1,6 +1,6 @@
 {
   "name": "scuttlebutt",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Record, transcribe, and summarize meetings in the Obsidian sidebar with local vLLM servers",
   "main": "main.js",
   "scripts": {

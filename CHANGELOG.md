@@ -4,6 +4,27 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.5] - Belay That (2026-09-08)
+
+### Added
+
+- **Pause and resume a recording.** A split control in the sidebar (Pause/Resume
+  and Stop) and a "Pause / resume recording" command (bindable to a hotkey) let
+  you pause an in-progress recording and pick it back up later. The recording is
+  captured as one continuous file and transcribed as a single clip.
+
+### Changed
+
+- Releases are now built and published by GitHub Actions with build provenance
+  attestations for main.js, manifest.json, and styles.css.
+- Added a Data and privacy section to the README covering what the plugin
+  accesses locally and what it sends to your configured servers.
+
+### Fixed
+
+- Recording duration (in the timer, status bar, and saved filename) now excludes
+  paused time, so it reflects the actual recorded audio length.
+
 ## [1.0.4] — Loose Lips (2026-09-07)
 
 ### Added
