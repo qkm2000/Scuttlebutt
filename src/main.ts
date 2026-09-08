@@ -633,13 +633,18 @@ class AIService {
 		}
 		const timeoutMs = this.settings.llmTimeout * 1000;
 		let timedOut = false;
-		const timer =
-			timeoutMs > 0
-				? window.setTimeout(() => {
-						timedOut = true;
-						controller.abort();
-				  }, timeoutMs)
-				: null;
+		// Idle timeout: reset on every chunk so a healthy (but slow) stream is never cut;
+		// only a genuine stall — no token for the whole window — aborts it.
+		let timer: number | null = null;
+		const arm = () => {
+			if (timeoutMs <= 0) return;
+			if (timer !== null) window.clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				timedOut = true;
+				controller.abort();
+			}, timeoutMs);
+		};
+		arm();
 
 		let contentRaw = '';
 		let reasoningField = '';
@@ -678,6 +683,7 @@ class AIService {
 			for (;;) {
 				const { done, value } = await reader.read();
 				if (done) break;
+				arm(); // healthy stream: reset the idle timer on every chunk
 				buffer += decoder.decode(value, { stream: true });
 				let nl: number;
 				while ((nl = buffer.indexOf('\n')) !== -1) {
