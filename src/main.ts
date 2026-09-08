@@ -265,6 +265,7 @@ class MeetingRecorder {
 	private audioContext: AudioContext | null = null;
 	private chunks: Blob[] = [];
 	private mimeType = 'audio/webm';
+	private starting = false;
 
 	isRecording(): boolean {
 		return this.mediaRecorder?.state === 'recording';
@@ -293,6 +294,11 @@ class MeetingRecorder {
 		systemAudioDeviceId?: string;
 		captureSystemAudio: boolean;
 	}): Promise<{ systemAudio: boolean }> {
+		// A re-entrant start (double-click, ribbon + command) is a no-op — otherwise the
+		// second call orphans the first mic MediaStream, leaving the mic captured.
+		if (this.starting || this.isRecording()) return { systemAudio: false };
+		this.starting = true;
+		try {
 		// Microphone — the base track. Mic processing (echo cancellation, noise
 		// suppression) is on; a system/loopback source below is captured raw so that
 		// processing doesn't gate it.
@@ -350,6 +356,14 @@ class MeetingRecorder {
 		};
 		this.mediaRecorder.start(1000);
 		return { systemAudio };
+		} catch (err) {
+			// A failure after getUserMedia (e.g. the MediaRecorder ctor throwing) must not
+			// leave mic/loopback tracks or the AudioContext open.
+			this.cleanup();
+			throw err;
+		} finally {
+			this.starting = false;
+		}
 	}
 
 	/** Mix several audio streams down to a single MediaStream via the Web Audio graph. */
@@ -1807,6 +1821,11 @@ export default class ScuttlebuttPlugin extends Plugin {
 	}
 
 	async startRecording(): Promise<void> {
+		// Synchronous guard: a second call (double-click, ribbon + command) before the first
+		// resolves would start a concurrent recorder and orphan the first mic stream.
+		if (this.recorder.isActive() || this.startingRecording) return;
+		this.startingRecording = true;
+		try {
 		if (this.session.status !== 'idle' && this.session.status !== 'error') {
 			// Fresh recording starts a fresh session unless there is unsaved review content.
 			if (this.session.summary || this.session.transcript) {
@@ -1842,6 +1861,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.startStatusBarTimer();
 		await this.activateView();
 		this.refreshViews();
+		} finally {
+			this.startingRecording = false;
+		}
 	}
 
 	async stopRecording(): Promise<void> {
