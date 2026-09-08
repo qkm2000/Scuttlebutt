@@ -41,6 +41,7 @@ import {
 	parseTranscriptResponse,
 	reasoningParams,
 	ReasoningLevel,
+	recordedMs,
 	responseHasSpeakers,
 	sanitizeFileName,
 	sanitizeTitle,
@@ -840,7 +841,9 @@ interface MeetingSession {
 	summary: string;
 	title: string;
 	tags: string[];
-	startedAt: number | null;
+	paused: boolean; // true while a recording is paused; drives the "Paused" display only
+	activeMs: number; // recorded ms banked from completed (pre-pause) segments
+	segmentStartedAt: number | null; // start of the current active segment; null while paused / not recording
 	elapsedMs: number;
 	error: string | null;
 	activeTab: ReviewTab;
@@ -872,7 +875,9 @@ function newSession(
 		summary: '',
 		title: '',
 		tags: [],
-		startedAt: null,
+		paused: false,
+		activeMs: 0,
+		segmentStartedAt: null,
 		elapsedMs: 0,
 		error: null,
 		activeTab: 'summary',
@@ -962,8 +967,8 @@ class ScuttlebuttView extends ItemView {
 	}
 
 	updateTimer(): void {
-		if (this.timerEl && this.s.startedAt) {
-			this.timerEl.setText(formatDuration(Date.now() - this.s.startedAt));
+		if (this.timerEl) {
+			this.timerEl.setText(formatDuration(recordedMs(this.s.activeMs, this.s.segmentStartedAt, Date.now())));
 		}
 	}
 
@@ -1748,7 +1753,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 			);
 		}
 		this.session = this.freshSession();
-		this.session.startedAt = Date.now();
+		this.session.activeMs = 0;
+		this.session.segmentStartedAt = Date.now();
+		this.session.paused = false;
 		this.setStatus('recording');
 		this.startStatusBarTimer();
 		await this.activateView();
@@ -1756,8 +1763,14 @@ export default class ScuttlebuttPlugin extends Plugin {
 	}
 
 	async stopRecording(): Promise<void> {
-		if (!this.recorder.isRecording()) return;
-		this.session.elapsedMs = this.session.startedAt ? Date.now() - this.session.startedAt : 0;
+		if (!this.recorder.isActive()) return;
+		const now = Date.now();
+		if (this.session.segmentStartedAt !== null) {
+			this.session.activeMs += now - this.session.segmentStartedAt;
+			this.session.segmentStartedAt = null;
+		}
+		this.session.paused = false;
+		this.session.elapsedMs = this.session.activeMs;
 		const blob = await this.recorder.stop();
 		this.stopStatusBarTimer();
 		if (blob.size === 0) {
@@ -2268,11 +2281,12 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 	private updateStatusBar(): void {
 		if (!this.statusBarEl) return;
-		if (this.session.status === 'recording' && this.session.startedAt) {
+		if (this.session.status === 'recording') {
 			this.statusBarEl.style.display = '';
 			this.statusBarEl.empty();
 			this.statusBarEl.createSpan({ cls: 'mh-sb-dot' });
-			this.statusBarEl.createSpan({ text: ' ' + formatDuration(Date.now() - this.session.startedAt) });
+			const t = formatDuration(recordedMs(this.session.activeMs, this.session.segmentStartedAt, Date.now()));
+			this.statusBarEl.createSpan({ text: ' ' + t + (this.session.paused ? ' (paused)' : '') });
 			this.statusBarEl.onclick = () => this.activateView();
 		} else {
 			this.statusBarEl.style.display = 'none';
