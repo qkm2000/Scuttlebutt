@@ -1618,6 +1618,15 @@ export default class ScuttlebuttPlugin extends Plugin {
 			callback: () => this.toggleRecording(),
 		});
 		this.addCommand({
+			id: 'toggle-pause',
+			name: 'Pause / resume recording',
+			checkCallback: (checking) => {
+				const can = this.recorder.isActive();
+				if (can && !checking) this.togglePause();
+				return can;
+			},
+		});
+		this.addCommand({
 			id: 'process-recording',
 			name: 'Transcribe & summarize current recording',
 			checkCallback: (checking) => {
@@ -1787,6 +1796,24 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.refreshViews();
 		new Notice('Recording saved. Transcribing…');
 		this.runPipeline();
+	}
+
+	togglePause(): void {
+		if (!this.recorder.isActive()) return;
+		const now = Date.now();
+		if (this.session.paused) {
+			this.recorder.resume();
+			this.session.segmentStartedAt = now;
+			this.session.paused = false;
+		} else {
+			this.recorder.pause();
+			if (this.session.segmentStartedAt !== null) {
+				this.session.activeMs += now - this.session.segmentStartedAt;
+				this.session.segmentStartedAt = null;
+			}
+			this.session.paused = true;
+		}
+		this.refreshViews();
 	}
 
 	// ---- import ----------------------------------------------------------
