@@ -1620,10 +1620,16 @@ export default class ScuttlebuttPlugin extends Plugin {
 	ai!: AIService;
 	private statusBarEl: HTMLElement | null = null;
 	private statusBarTimer: number | null = null;
-	// In-flight transcription/summary request, so the user can cancel it. `cancelled`
-	// distinguishes a user abort from a genuine failure in the catch handlers.
+	// In-flight transcription/summary request, so the user can cancel it. Each run owns
+	// its own AbortController; catch handlers classify a user abort via controller.signal.aborted.
 	private activeController: AbortController | null = null;
-	private cancelled = false;
+	private startingRecording = false;
+
+	/** True while a transcription, summary, or save is running. */
+	isBusy(): boolean {
+		const st = this.session.status;
+		return st === 'transcribing' || st === 'summarizing' || st === 'saving';
+	}
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -1655,7 +1661,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			id: 'process-recording',
 			name: 'Transcribe & summarize current recording',
 			checkCallback: (checking) => {
-				const can = !!this.session.audioData && this.session.status !== 'transcribing';
+				const can = !!this.session.audioData && !this.isBusy();
 				if (can && !checking) this.runPipeline();
 				return can;
 			},
@@ -1895,6 +1901,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 	// ---- pipeline --------------------------------------------------------
 
 	async runPipeline(): Promise<void> {
+		if (this.isBusy()) {
+			new Notice('A transcription or summary is already running.');
+			return;
+		}
 		const ok = await this.transcribeStep();
 		if (!ok) return;
 
@@ -1915,6 +1925,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async retranscribe(): Promise<void> {
 		if (!this.session.audioData) {
 			new Notice('No audio to transcribe.');
+			return;
+		}
+		if (this.isBusy()) {
+			new Notice('A transcription or summary is already running.');
 			return;
 		}
 		const ok = await this.transcribeStep();
@@ -1939,7 +1953,6 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.refreshViews();
 		const name = s.audioName || 'recording.webm';
 		const wantSpeakers = s.diarize;
-		this.cancelled = false;
 		const controller = new AbortController();
 		this.activeController = controller;
 		let result: { text: string; hasSpeakers: boolean };
@@ -1950,7 +1963,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			} catch (diarErr) {
 				// A cancel or a non-diarized failure is terminal; only a diarized attempt
 				// is worth retrying flat.
-				if (this.cancelled || !wantSpeakers) throw diarErr;
+				if (controller.signal.aborted || !wantSpeakers) throw diarErr;
 				fellBack = true;
 				new Notice('Speaker identification failed — transcribing without speaker labels.');
 				this.setProgress('Retrying without speaker identification…', 30);
@@ -1958,7 +1971,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 				result = await this.ai.transcribe(s.audioData, name, s.audioMime, false, controller.signal);
 			}
 		} catch (err: any) {
-			if (this.cancelled) {
+			if (controller.signal.aborted) {
 				this.finishCancelled();
 				return false;
 			}
@@ -1969,7 +1982,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			new Notice('Transcription failed: ' + s.error);
 			return false;
 		} finally {
-			this.activeController = null;
+			if (this.activeController === controller) this.activeController = null;
 		}
 		s.transcript = result.text;
 		// Diarization was requested and the request *succeeded*, but the endpoint gave
@@ -1994,6 +2007,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 			new Notice('Nothing to summarize yet.');
 			return;
 		}
+		if (this.isBusy()) {
+			new Notice('A transcription or summary is already running.');
+			return;
+		}
 		await this.summarizeInternal();
 	}
 
@@ -2014,7 +2031,6 @@ export default class ScuttlebuttPlugin extends Plugin {
 			return;
 		}
 		if (s.status === 'summarizing' || s.status === 'transcribing') return;
-		this.cancelled = false;
 		const controller = new AbortController();
 		this.activeController = controller;
 		this.setStatus('summarizing');
@@ -2031,7 +2047,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.refreshViews();
 			window.setTimeout(() => this.clearProgressIfIdle(), 3000);
 		} catch (err: any) {
-			if (this.cancelled) {
+			if (controller.signal.aborted) {
 				this.finishCancelled();
 				return;
 			}
@@ -2040,7 +2056,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.refreshViews();
 			new Notice(`${piece === 'title' ? 'Title' : 'Tag'} generation failed: ${err?.message ?? err}`);
 		} finally {
-			this.activeController = null;
+			if (this.activeController === controller) this.activeController = null;
 		}
 	}
 
@@ -2056,7 +2072,6 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 		const contextDocs = await this.readContextDocs();
 
-		this.cancelled = false;
 		const controller = new AbortController();
 		this.activeController = controller;
 		try {
@@ -2083,7 +2098,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 				s.summary = result.summary;
 				s.reasoning = result.reasoning;
 			} catch (err: any) {
-				if (this.cancelled) {
+				if (controller.signal.aborted) {
 					this.finishCancelled();
 					return;
 				}
@@ -2105,7 +2120,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 				try {
 					s.title = await this.ai.generateTitle(basis, controller.signal, s.reasoningEffort);
 				} catch (err) {
-					if (this.cancelled) {
+					if (controller.signal.aborted) {
 						this.finishCancelled();
 						return;
 					}
@@ -2116,7 +2131,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 				try {
 					s.tags = await this.ai.generateTags(s.title, basis, this.getVaultTags(), controller.signal, s.reasoningEffort);
 				} catch (err) {
-					if (this.cancelled) {
+					if (controller.signal.aborted) {
 						this.finishCancelled();
 						return;
 					}
@@ -2133,7 +2148,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.refreshViews();
 			window.setTimeout(() => this.clearProgressIfIdle(), 4000);
 		} finally {
-			this.activeController = null;
+			if (this.activeController === controller) this.activeController = null;
 		}
 	}
 
@@ -2147,7 +2162,6 @@ export default class ScuttlebuttPlugin extends Plugin {
 	/** Abort the in-flight transcription/summary request, if any. */
 	cancelActive(): void {
 		if (!this.activeController) return;
-		this.cancelled = true;
 		this.activeController.abort();
 		this.setProgress('Cancelling…', this.session.progressPct);
 		this.refreshViews();
