@@ -1028,6 +1028,7 @@ class ScuttlebuttView extends ItemView {
 	}
 
 	private statusTone(): string {
+		if (this.s.paused) return 'paused';
 		switch (this.s.status) {
 			case 'recording':
 				return 'rec';
@@ -1045,6 +1046,7 @@ class ScuttlebuttView extends ItemView {
 	}
 
 	private statusLabel(): string {
+		if (this.s.paused) return 'Paused';
 		switch (this.s.status) {
 			case 'recording':
 				return 'Recording';
@@ -1070,19 +1072,38 @@ class ScuttlebuttView extends ItemView {
 		const card = root.createDiv('mh-capture');
 		const recording = s.status === 'recording';
 
-		const recordBtn = card.createEl('button', { cls: ['mh-record-btn', recording ? 'is-recording' : ''] });
+		const busy = s.status === 'transcribing' || s.status === 'summarizing' || s.status === 'saving';
 		if (recording) {
-			const eq = recordBtn.createDiv('mh-eq');
+			const live = card.createDiv({ cls: ['mh-record-live', s.paused ? 'is-paused' : 'is-recording'] });
+
+			const display = live.createDiv('mh-record-display');
+			const eq = display.createDiv({ cls: ['mh-eq', s.paused ? 'is-paused' : ''] });
 			for (let i = 0; i < 4; i++) eq.createSpan('mh-eq-bar');
-			this.timerEl = recordBtn.createSpan({ cls: 'mh-timer', text: formatDuration(s.elapsedMs) });
-			recordBtn.createSpan({ text: 'Stop', cls: 'mh-record-label' });
+			this.timerEl = display.createSpan({
+				cls: 'mh-timer',
+				text: formatDuration(recordedMs(s.activeMs, s.segmentStartedAt, Date.now())),
+			});
+			if (s.paused) display.createSpan({ cls: 'mh-timer-note', text: 'paused' });
+
+			const actions = live.createDiv('mh-record-actions');
+			const pauseBtn = actions.createEl('button', { cls: 'mh-pause-btn' });
+			setIcon(pauseBtn.createSpan('mh-record-icon'), s.paused ? 'play' : 'pause');
+			pauseBtn.createSpan({ text: s.paused ? 'Resume' : 'Pause' });
+			pauseBtn.disabled = busy;
+			pauseBtn.onclick = () => this.plugin.togglePause();
+
+			const stopBtn = actions.createEl('button', { cls: 'mh-stop-btn' });
+			setIcon(stopBtn.createSpan('mh-record-icon'), 'square');
+			stopBtn.createSpan({ text: 'Stop' });
+			stopBtn.disabled = busy;
+			stopBtn.onclick = () => this.plugin.stopRecording();
 		} else {
+			const recordBtn = card.createEl('button', { cls: 'mh-record-btn' });
 			setIcon(recordBtn.createSpan('mh-record-icon'), 'mic');
 			recordBtn.createSpan({ text: 'Start recording', cls: 'mh-record-label' });
+			recordBtn.disabled = busy;
+			recordBtn.onclick = () => this.plugin.toggleRecording();
 		}
-		const busy = s.status === 'transcribing' || s.status === 'summarizing' || s.status === 'saving';
-		recordBtn.disabled = busy;
-		recordBtn.onclick = () => this.plugin.toggleRecording();
 
 		const importRow = card.createDiv('mh-import-row');
 		const vaultBtn = importRow.createEl('button', { cls: 'mh-ghost-btn' });
