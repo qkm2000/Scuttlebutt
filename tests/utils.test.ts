@@ -175,6 +175,9 @@ test('yamlString quotes only when needed', () => {
 	assert.equal(yamlString('Has: colon'), '"Has: colon"');
 	assert.equal(yamlString('quote"inside'), '"quote\\"inside"');
 	assert.equal(yamlString(' leading'), '" leading"');
+	// Backslashes must be escaped before quotes, or the double-quoted scalar is invalid YAML.
+	assert.equal(yamlString('C:\\Users'), '"C:\\\\Users"');
+	assert.equal(yamlString('a\\"b'), '"a\\\\\\"b"');
 });
 
 test('calloutBlock prefixes every line and handles blanks', () => {

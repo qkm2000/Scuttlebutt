@@ -226,8 +226,8 @@ export function parseTranscriptResponse(rawText: string): string {
 
 /** Quote a value for YAML frontmatter when it contains characters that need it. */
 export function yamlString(value: string): string {
-	if (/[:#\[\]{}",&*!|>%@`]/.test(value) || /^\s|\s$/.test(value)) {
-		return '"' + value.replace(/"/g, '\\"') + '"';
+	if (/[:#\[\]{}",&*!|>%@`\\]/.test(value) || /^\s|\s$/.test(value)) {
+		return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 	}
 	return value;
 }
