@@ -60,9 +60,36 @@ npm test          # run the unit tests (Node's built-in test runner)
 
 The pure logic (file naming, tag/transcript parsing, multipart encoding, …) lives in `src/utils.ts` and is covered by `tests/utils.test.ts`. Obsidian- and DOM-dependent code lives in `src/main.ts`.
 
+### Releasing
+
+Releases are built and published by GitHub Actions (`.github/workflows/release.yml`). To cut one:
+
+1. Bump the version in `manifest.json`, `package.json`, and `versions.json`, and add a `CHANGELOG.md` entry.
+2. Commit, then tag with the exact version (no `v` prefix) and push the tag:
+
+   ```bash
+   git tag 1.0.5 && git push origin 1.0.5
+   ```
+
+CI verifies the tag matches `manifest.json`, runs the tests, builds, attests the assets, and publishes the release with `main.js`, `manifest.json`, and `styles.css` attached individually.
+
 ## Notes on system audio
 
 Scuttlebutt runs as an Obsidian plugin (JavaScript in Electron), so it's limited to the browser's `getUserMedia` / `getDisplayMedia` APIs. On macOS those **cannot** capture system audio the way a native app (like anarlog, which uses Core Audio process taps) can. To record the other side of a call on macOS, install a loopback device such as [BlackHole](https://existential.audio/blackhole/), create an Aggregate Device that includes it, and select that device under **Settings → Capture → Input device**. When "Capture system audio" yields no track, Scuttlebutt tells you and continues with the microphone.
+
+## Data & privacy
+
+Scuttlebutt keeps your data on your machine and your own servers. Specifically:
+
+- It **lists file names in your vault** only to power two pickers: "Pick an audio clip" (audio files) and "Add a context note" (markdown files). This listing stays local — nothing is uploaded unless you explicitly pick a file.
+- It sends **audio** to the transcription (Whisper/vLLM) server you configure, and the **transcript plus any context notes you choose** to the summarization server you configure.
+- Nothing else leaves your machine. There is no telemetry, and there are no third-party services beyond the servers you point it at.
+
+Release assets (`main.js`, `manifest.json`, `styles.css`) are built in GitHub Actions with [build provenance attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds), so you can cryptographically verify they were built from this repository:
+
+```bash
+gh attestation verify main.js --repo qkm2000/Scuttlebutt
+```
 
 ## Notes
 
