@@ -264,6 +264,24 @@ class MeetingRecorder {
 		return this.mediaRecorder?.state === 'recording';
 	}
 
+	isPaused(): boolean {
+		return this.mediaRecorder?.state === 'paused';
+	}
+
+	/** True while a recording exists and is either capturing or paused. */
+	isActive(): boolean {
+		const st = this.mediaRecorder?.state;
+		return st === 'recording' || st === 'paused';
+	}
+
+	pause(): void {
+		if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.pause();
+	}
+
+	resume(): void {
+		if (this.mediaRecorder?.state === 'paused') this.mediaRecorder.resume();
+	}
+
 	async start(opts: {
 		inputDeviceId?: string;
 		systemAudioDeviceId?: string;
