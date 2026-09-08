@@ -468,6 +468,7 @@ class AIService {
 		label: string,
 		signal?: AbortSignal
 	): Promise<{ status: number; text: string }> {
+		const started = Date.now();
 		const controller = new AbortController();
 		const onExternalAbort = () => controller.abort();
 		if (signal) {
@@ -490,9 +491,12 @@ class AIService {
 			if (timedOut) throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
 			// Not an abort and not a timeout — most often a CORS/network failure. Retry
 			// through requestUrl (no CORS check, but no cancellation either).
+			// Don't re-arm a fresh full timeout on the fallback leg — cap it at what's left,
+			// so the worst-case wait is ~1x the setting, not 2x.
+			const remaining = timeoutMs > 0 ? Math.max(1000, timeoutMs - (Date.now() - started)) : timeoutMs;
 			const resp = await withTimeout(
 				requestUrl({ url, method: 'POST', headers, body, throw: false }),
-				timeoutMs,
+				remaining,
 				label
 			);
 			return { status: resp.status, text: resp.text };
