@@ -938,6 +938,38 @@ class ConfirmModal extends Modal {
 	}
 }
 
+class SaveChoiceModal extends Modal {
+	constructor(
+		app: App,
+		private existingPath: string,
+		private onReplace: () => void,
+		private onNew: () => void
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('p', { text: `A note already exists at "${this.existingPath}".` });
+		const row = this.contentEl.createDiv({ cls: 'modal-button-container' });
+		const replace = row.createEl('button', { cls: 'mod-cta', text: 'Replace' });
+		replace.onclick = () => {
+			this.close();
+			this.onReplace();
+		};
+		const asNew = row.createEl('button', { text: 'New file' });
+		asNew.onclick = () => {
+			this.close();
+			this.onNew();
+		};
+		const cancel = row.createEl('button', { text: 'Cancel' });
+		cancel.onclick = () => this.close();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 class FileSuggestModal extends FuzzySuggestModal<TFile> {
 	constructor(
 		app: App,
@@ -1572,7 +1604,19 @@ class ScuttlebuttView extends ItemView {
 		setIcon(save.createSpan(), 'save');
 		save.createSpan({ text: s.savedNotePath ? 'Saved ✓  Save again' : 'Save note' });
 		save.disabled = (!s.summary && !s.transcript) || this.plugin.isBusy();
-		save.onclick = () => this.plugin.saveNote();
+		save.onclick = () => {
+			const prev = s.savedNotePath;
+			if (prev && this.app.vault.getAbstractFileByPath(prev)) {
+				new SaveChoiceModal(
+					this.app,
+					prev,
+					() => this.plugin.saveNote('replace'),
+					() => this.plugin.saveNote('new')
+				).open();
+			} else {
+				this.plugin.saveNote('new');
+			}
+		};
 
 		const reset = actions.createEl('button', { cls: 'mh-ghost-btn mh-reset' });
 		setIcon(reset.createSpan(), 'rotate-ccw');
@@ -2274,7 +2318,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 	// ---- saving ----------------------------------------------------------
 
-	async saveNote(): Promise<void> {
+	async saveNote(mode: 'new' | 'replace' = 'new'): Promise<void> {
 		const s = this.session;
 		if (!s.summary && !s.transcript) {
 			new Notice('Nothing to save yet.');
@@ -2294,7 +2338,8 @@ export default class ScuttlebuttPlugin extends Plugin {
 				audioLink = await this.saveAudioFile();
 			}
 
-			const notePath = await this.writeNote(audioLink);
+			const replacePath = mode === 'replace' ? s.savedNotePath : null;
+			const notePath = await this.writeNote(audioLink, replacePath);
 			s.savedNotePath = notePath;
 			this.setStatus('ready');
 			this.setProgress('Saved ✓', 100);
@@ -2324,14 +2369,16 @@ export default class ScuttlebuttPlugin extends Plugin {
 		return path;
 	}
 
-	private async writeNote(audioLink: string | null): Promise<string> {
+	private async writeNote(audioLink: string | null, replacePath?: string | null): Promise<string> {
 		const s = this.session;
 		await this.ensureFolder(this.settings.notesFolder);
 
 		const now = new Date();
 		const title = s.title.trim() || 'Meeting';
 		const base = sanitizeFileName(`${todayStamp(now)} — ${title}`);
-		const path = await this.uniquePath(this.settings.notesFolder, base, 'md');
+		const existing = replacePath ? this.app.vault.getAbstractFileByPath(replacePath) : null;
+		const path =
+			existing instanceof TFile ? existing.path : await this.uniquePath(this.settings.notesFolder, base, 'md');
 
 		const fm: string[] = ['---'];
 		fm.push(`date created: ${yamlString(mmt(now).format(this.settings.dateFormat || DEFAULT_DATE_FORMAT))}`);
@@ -2354,6 +2401,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 			parts.push('', calloutBlock('note', 'Transcript', s.transcript.trim(), true));
 		}
 
+		if (existing instanceof TFile) {
+			await this.app.vault.modify(existing, parts.join('\n') + '\n');
+			return existing.path;
+		}
 		const file = await this.app.vault.create(path, parts.join('\n') + '\n');
 		return file.path;
 	}
