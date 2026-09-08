@@ -1012,6 +1012,7 @@ class ScuttlebuttView extends ItemView {
 	private timer: number | null = null;
 	private timerEl: HTMLElement | null = null;
 	private audioUrl: string | null = null;
+	private audioUrlFor: ArrayBuffer | null = null;
 	// Disclosure state, kept across re-renders (both collapsed by default).
 	private runOptionsOpen = false;
 	private reasoningOpen = false;
@@ -1048,6 +1049,7 @@ class ScuttlebuttView extends ItemView {
 			URL.revokeObjectURL(this.audioUrl);
 			this.audioUrl = null;
 		}
+		this.audioUrlFor = null;
 	}
 
 	private get s(): MeetingSession {
@@ -1077,7 +1079,9 @@ class ScuttlebuttView extends ItemView {
 
 	render(): void {
 		this.stopTimer();
-		this.revokeAudioUrl();
+		// Note: the audio object URL is intentionally NOT revoked here — it's cached by
+		// data reference (see renderCapture) so re-renders don't rebuild the Blob or reset
+		// playback. It's revoked when the data changes or the view closes.
 		this.timerEl = null;
 		this.streamSummaryEl = null;
 		this.streamReasoningEl = null;
@@ -1219,7 +1223,13 @@ class ScuttlebuttView extends ItemView {
 
 			if (s.audioData) {
 				const player = card.createEl('audio', { cls: 'mh-audio', attr: { controls: 'true' } });
-				this.audioUrl = URL.createObjectURL(new Blob([s.audioData], { type: s.audioMime }));
+				// Reuse the object URL unless the underlying audio actually changed, so a
+				// re-render doesn't rebuild a large Blob or reset playback position.
+				if (!this.audioUrl || this.audioUrlFor !== s.audioData) {
+					this.revokeAudioUrl();
+					this.audioUrl = URL.createObjectURL(new Blob([s.audioData], { type: s.audioMime }));
+					this.audioUrlFor = s.audioData;
+				}
 				player.src = this.audioUrl;
 			}
 		}
@@ -1804,9 +1814,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 	}
 
 	async saveSettings(): Promise<void> {
+		// Persist only. AIService holds `settings` by reference (mutated in place), so it needs
+		// no rebuild; and the sidebar reads session state, not settings, so no re-render is
+		// needed here. Re-rendering per keystroke rebuilt the audio Blob and reset playback.
 		await this.saveData(this.settings);
-		this.ai = new AIService(this.settings);
-		this.refreshViews();
 	}
 
 	async activateView(): Promise<void> {
