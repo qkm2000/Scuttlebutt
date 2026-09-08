@@ -31,6 +31,10 @@ import {
 	requestUrl,
 	setIcon,
 } from 'obsidian';
+
+// Obsidian re-exports `moment` as a callable at runtime, but its bundled type is the
+// namespace (no call signature), so `tsc` rejects `moment(...)`. Alias to the call form.
+const mmt = moment as unknown as (inp?: string | number | Date) => { format(fmt: string): string };
 import {
 	buildMultipart,
 	calloutBlock,
@@ -2178,7 +2182,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 	private getVaultTags(): string[] {
 		try {
-			const tags = (this.app.metadataCache as any).getTags?.() as Record<string, number> | undefined;
+			// getTags() is an undocumented (but stable) MetadataCache method not in the typings.
+			const cache = this.app.metadataCache as unknown as { getTags?: () => Record<string, number> };
+			const tags = cache.getTags?.();
 			if (!tags) return [];
 			return Object.keys(tags)
 				.map((t) => t.replace(/^#/, ''))
@@ -2246,7 +2252,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 		const path = await this.uniquePath(this.settings.notesFolder, base, 'md');
 
 		const fm: string[] = ['---'];
-		fm.push(`date created: ${yamlString(moment(now).format(this.settings.dateFormat || DEFAULT_DATE_FORMAT))}`);
+		fm.push(`date created: ${yamlString(mmt(now).format(this.settings.dateFormat || DEFAULT_DATE_FORMAT))}`);
 		if (s.tags.length > 0) fm.push(`tags: [${s.tags.map(yamlString).join(', ')}]`);
 		if (s.participants.length > 0) {
 			fm.push(`participants: [${s.participants.map(yamlString).join(', ')}]`);
@@ -2622,13 +2628,13 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					this.plugin.settings.dateFormat = v || DEFAULT_DATE_FORMAT;
 					await this.plugin.saveSettings();
 					if (datePreview) {
-						datePreview.setText('Preview: ' + moment().format(this.plugin.settings.dateFormat));
+						datePreview.setText('Preview: ' + mmt().format(this.plugin.settings.dateFormat));
 					}
 				})
 			)
 			.then((s) => {
 				datePreview = s.descEl.createDiv({ cls: 'mh-hint' });
-				datePreview.setText('Preview: ' + moment().format(this.plugin.settings.dateFormat || DEFAULT_DATE_FORMAT));
+				datePreview.setText('Preview: ' + mmt().format(this.plugin.settings.dateFormat || DEFAULT_DATE_FORMAT));
 			});
 
 		new Setting(containerEl)
