@@ -1571,7 +1571,7 @@ class ScuttlebuttView extends ItemView {
 		const save = actions.createEl('button', { cls: 'mh-primary-btn' });
 		setIcon(save.createSpan(), 'save');
 		save.createSpan({ text: s.savedNotePath ? 'Saved ✓  Save again' : 'Save note' });
-		save.disabled = !s.summary && !s.transcript;
+		save.disabled = (!s.summary && !s.transcript) || this.plugin.isBusy();
 		save.onclick = () => this.plugin.saveNote();
 
 		const reset = actions.createEl('button', { cls: 'mh-ghost-btn mh-reset' });
@@ -1726,7 +1726,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			id: 'save-note',
 			name: 'Save meeting note',
 			checkCallback: (checking) => {
-				const can = !!(this.session.summary || this.session.transcript);
+				const can = !!(this.session.summary || this.session.transcript) && !this.isBusy();
 				if (can && !checking) this.saveNote();
 				return can;
 			},
@@ -2278,6 +2278,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 		const s = this.session;
 		if (!s.summary && !s.transcript) {
 			new Notice('Nothing to save yet.');
+			return;
+		}
+		if (this.isBusy() && s.status !== 'saving') {
+			new Notice('Wait for the current step to finish before saving.');
 			return;
 		}
 		this.setStatus('saving');
