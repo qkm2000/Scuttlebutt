@@ -18,6 +18,7 @@ import {
 	FuzzySuggestModal,
 	ItemView,
 	MarkdownRenderer,
+	Modal,
 	Notice,
 	Plugin,
 	PluginSettingTab,
@@ -896,6 +897,33 @@ function newSession(
 // Fuzzy pickers
 // ---------------------------------------------------------------------------
 
+class ConfirmModal extends Modal {
+	constructor(
+		app: App,
+		private message: string,
+		private confirmLabel: string,
+		private onConfirm: () => void
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('p', { text: this.message });
+		const row = this.contentEl.createDiv({ cls: 'modal-button-container' });
+		const confirm = row.createEl('button', { cls: 'mod-warning', text: this.confirmLabel });
+		confirm.onclick = () => {
+			this.close();
+			this.onConfirm();
+		};
+		const cancel = row.createEl('button', { text: 'Cancel' });
+		cancel.onclick = () => this.close();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 class FileSuggestModal extends FuzzySuggestModal<TFile> {
 	constructor(
 		app: App,
@@ -1536,7 +1564,21 @@ class ScuttlebuttView extends ItemView {
 		setIcon(reset.createSpan(), 'rotate-ccw');
 		reset.createSpan({ text: 'New' });
 		reset.disabled = s.status === 'recording';
-		reset.onclick = () => this.plugin.resetSession();
+		reset.onclick = () => {
+			if (this.plugin.isBusy()) {
+				new ConfirmModal(
+					this.app,
+					'A transcription or summary is in progress. Cancel it and start a new session?',
+					'Cancel run & start new',
+					() => {
+						this.plugin.cancelActive();
+						this.plugin.resetSession();
+					}
+				).open();
+			} else {
+				this.plugin.resetSession();
+			}
+		};
 
 		if (s.savedNotePath) {
 			const open = actions.createEl('button', { cls: 'mh-ghost-btn' });
