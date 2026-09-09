@@ -868,6 +868,54 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* the render-hatch row we take over: strip the default setting-item chrome so
+   the tabbed UI lays out as a plain full-width block */
+.mh-settings-host {
+	display: block;
+	padding: 0;
+	border-top: none;
+}
+
+/* browser-style tab bar across the top of the settings surface */
+.mh-settings-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	margin-bottom: 12px;
+}
+
+.mh-settings-tab {
+	appearance: none;
+	background: transparent;
+	border: none;
+	border-bottom: 2px solid transparent;
+	border-radius: var(--radius-l) var(--radius-l) 0 0;
+	box-shadow: none;
+	padding: 7px 16px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+}
+
+.mh-settings-tab:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.mh-settings-tab.is-active {
+	color: var(--text-accent);
+	border-bottom-color: var(--text-accent);
+	font-weight: var(--font-semibold);
+}
+
+/* keep settings dropdowns a fixed width so a long option can't stretch the row */
+.mh-settings select.dropdown {
+	width: 220px;
+	max-width: 100%;
+	text-overflow: ellipsis;
+}
+
 /* ---- status bar -------------------------------------------------------- */
 
 .mh-statusbar { cursor: pointer; }
