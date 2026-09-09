@@ -4,6 +4,24 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - Careened (2026-09-09)
+
+### Changed
+
+- Raised the minimum Obsidian version to 1.7.2, required by the sidebar
+  reveal API the plugin awaits when opening its view.
+- The release workflow now runs ESLint (Obsidian's plugin-review ruleset), and a
+  new CI workflow lints, typechecks, and tests on every push and pull request, so
+  review issues are caught before a release is cut.
+
+### Fixed
+
+- Resolved every Obsidian plugin-review finding, with no change in behavior:
+  replaced direct element style assignment with CSS classes, dropped use of APIs
+  newer than the declared minimum version, tightened types to remove unsafe `any`
+  handling of network and JSON data, cleaned up redundant regex escapes, and
+  explicitly marked intentionally un-awaited promises.
+
 ## [1.1.0] - Squared Away (2026-09-09)
 
 ### Added

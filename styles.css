@@ -945,6 +945,7 @@
 /* ---- status bar -------------------------------------------------------- */
 
 .mh-statusbar { cursor: pointer; }
+.mh-hidden { display: none; }
 
 .mh-sb-dot {
 	display: inline-block;
