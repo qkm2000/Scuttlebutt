@@ -71,6 +71,7 @@
 .mh-pill-busy { color: var(--interactive-accent); background: rgba(120, 120, 220, 0.12); }
 .mh-pill-rec { color: #e5484d; background: rgba(229, 72, 77, 0.12); }
 .mh-pill-rec .mh-pill-dot { animation: mh-pulse 1.4s ease-in-out infinite; }
+.mh-pill-paused { color: #d9822b; background: rgba(217, 130, 43, 0.14); }
 
 @keyframes mh-pulse {
 	0%, 100% { opacity: 1; transform: scale(1); }
@@ -162,6 +163,80 @@
 @keyframes mh-eq {
 	0%, 100% { height: 4px; }
 	50% { height: 15px; }
+}
+
+/* live recording control: display row (eq + timer) over a split action row */
+.mh-record-live {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: 100%;
+	padding: 10px 12px;
+	border-radius: 8px;
+	background: #e5484d;
+	color: #fff;
+}
+
+.mh-record-live.is-recording {
+	box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.5);
+	animation: mh-rec-glow 1.8s ease-out infinite;
+}
+
+.mh-record-live.is-paused {
+	background: #b6603f;
+	animation: none;
+}
+
+.mh-record-display {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 9px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+}
+
+.mh-timer-note {
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-size: 10px;
+	opacity: 0.85;
+}
+
+.mh-record-actions {
+	display: flex;
+	gap: 8px;
+}
+
+.mh-pause-btn,
+.mh-stop-btn {
+	flex: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 8px 10px;
+	border: none;
+	border-radius: 6px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: #fff;
+	cursor: pointer;
+	background: rgba(255, 255, 255, 0.18);
+	transition: background 120ms ease, transform 80ms ease;
+}
+
+.mh-pause-btn:hover:not(:disabled),
+.mh-stop-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.28); }
+.mh-pause-btn:active:not(:disabled),
+.mh-stop-btn:active:not(:disabled) { transform: translateY(1px); }
+.mh-pause-btn:disabled,
+.mh-stop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* freeze the equalizer bars while paused */
+.mh-eq.is-paused .mh-eq-bar {
+	animation: none;
+	height: 4px;
 }
 
 .mh-import-row {
@@ -826,6 +901,45 @@
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-smaller);
 	line-height: 1.5;
+}
+
+/* ---- settings tabs ----------------------------------------------------- */
+
+.mh-settings-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 16px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mh-settings-tab {
+	appearance: none;
+	background: transparent;
+	border: none;
+	border-bottom: 2px solid transparent;
+	margin-bottom: -1px;
+	padding: 8px 12px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: none;
+	border-radius: 0;
+}
+
+.mh-settings-tab:hover { color: var(--text-normal); background: transparent; }
+
+.mh-settings-tab.is-active {
+	color: var(--text-accent);
+	border-bottom-color: var(--interactive-accent);
+}
+
+/* an inline warning under a setting (e.g. a very low timeout) */
+.mh-warn {
+	margin-top: 4px;
+	color: #d9822b;
+	font-size: var(--font-ui-smaller);
 }
 
 /* ---- status bar -------------------------------------------------------- */

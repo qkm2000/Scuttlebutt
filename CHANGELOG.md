@@ -4,6 +4,45 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - Squared Away (2026-09-09)
+
+### Added
+
+- **Pause and resume a recording.** A split control in the sidebar (Pause/Resume
+  and Stop) and a "Pause / resume recording" command (bindable to a hotkey) let
+  you pause an in-progress recording and pick it back up later. The recording is
+  captured as one continuous file and transcribed as a single clip.
+
+### Changed
+
+- Releases are now built and published by GitHub Actions with build provenance
+  attestations for main.js, manifest.json, and styles.css.
+- Added a Data and privacy section to the README covering what the plugin
+  accesses locally and what it sends to your configured servers.
+- Added a strict TypeScript typecheck to the build and pinned the Obsidian API
+  version for reproducible builds.
+
+### Fixed
+
+- Recording duration (in the timer, status bar, and saved filename) now excludes
+  paused time, so it reflects the actual recorded audio length.
+- Saving is blocked while a transcription or summary is still running, so a
+  partial summary can no longer be saved as a finished note.
+- "New" during a running job now asks for confirmation and cancels the job
+  cleanly instead of silently discarding it.
+- Cancelling a job and immediately starting another no longer shows a phantom
+  error or breaks the new job's Cancel button.
+- Starting a recording twice in quick succession no longer leaves the microphone
+  captured in the background.
+- "Save again" now offers to replace the existing note in place instead of
+  always creating a numbered copy.
+- Frontmatter values containing backslashes are escaped correctly, so notes with
+  such titles or participants stay valid.
+- A slow but healthy streaming summary is no longer cut off by the request
+  timeout; only a genuine stall (no output for the timeout window) times out.
+- Editing settings no longer rebuilds the sidebar and its audio player on every
+  keystroke.
+
 ## [1.0.4] — Loose Lips (2026-09-07)
 
 ### Added

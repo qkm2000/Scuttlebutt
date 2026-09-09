@@ -22,3 +22,7 @@ server/
 
 # AI-coder files/folders
 .claude
+
+# Design specs / change docs for local review only
+docs/changes/
+docs/reviews/

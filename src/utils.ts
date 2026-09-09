@@ -27,6 +27,16 @@ export function formatDuration(ms: number): string {
 	return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/**
+ * Total recorded milliseconds: time banked from completed segments (`activeMs`)
+ * plus the current live segment (`now - segmentStartedAt`). While paused,
+ * `segmentStartedAt` is null and the value freezes at `activeMs`. Never negative.
+ */
+export function recordedMs(activeMs: number, segmentStartedAt: number | null, now: number): number {
+	const live = segmentStartedAt !== null ? Math.max(0, now - segmentStartedAt) : 0;
+	return activeMs + live;
+}
+
 /** Local-date stamp as YYYY-MM-DD. */
 export function todayStamp(d: Date): string {
 	const pad = (n: number) => n.toString().padStart(2, '0');
@@ -216,8 +226,8 @@ export function parseTranscriptResponse(rawText: string): string {
 
 /** Quote a value for YAML frontmatter when it contains characters that need it. */
 export function yamlString(value: string): string {
-	if (/[:#\[\]{}",&*!|>%@`]/.test(value) || /^\s|\s$/.test(value)) {
-		return '"' + value.replace(/"/g, '\\"') + '"';
+	if (/[:#\[\]{}",&*!|>%@`\\]/.test(value) || /^\s|\s$/.test(value)) {
+		return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 	}
 	return value;
 }
