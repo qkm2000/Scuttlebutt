@@ -845,48 +845,6 @@
 
 /* ---- settings ---------------------------------------------------------- */
 
-/* Make each section label (Transcription, Summary, Capture, …) read unmistakably
-   as a header rather than plain text. */
-.mh-settings .setting-item-heading {
-	margin-top: 34px;
-	padding: 6px 0 8px 12px;
-	border-bottom: 2px solid var(--interactive-accent);
-	border-left: 3px solid var(--interactive-accent);
-	background: linear-gradient(
-		to right,
-		var(--background-modifier-hover),
-		transparent 60%
-	);
-	border-radius: 4px 4px 0 0;
-}
-
-.mh-settings .setting-item-heading .setting-item-name {
-	font-size: calc(var(--font-ui-medium) * 1.15);
-	font-weight: 800;
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
-	color: var(--text-accent);
-}
-
-.mh-settings .setting-item-heading .setting-item-description {
-	text-transform: none;
-	letter-spacing: 0;
-}
-
-/* Keep dropdowns a fixed width so long option labels don't stretch the setting
-   row. Without this, detecting input devices (or loading long model IDs) widens
-   the native <select> to its longest option and pushes the layout. */
-.mh-settings .setting-item-control .dropdown {
-	/* A preferred width so the control doesn't resize as the selected option changes,
-	   but it may shrink to fit a narrow pane rather than squishing the setting label. */
-	width: 10rem;
-	max-width: 100%;
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
 .mh-test-status {
 	margin-right: 10px;
 	font-size: var(--font-ui-smaller);
@@ -901,38 +859,6 @@
 	font-family: var(--font-monospace);
 	font-size: var(--font-ui-smaller);
 	line-height: 1.5;
-}
-
-/* ---- settings tabs ----------------------------------------------------- */
-
-.mh-settings-tabs {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 4px;
-	margin-bottom: 16px;
-	border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.mh-settings-tab {
-	appearance: none;
-	background: transparent;
-	border: none;
-	border-bottom: 2px solid transparent;
-	margin-bottom: -1px;
-	padding: 8px 12px;
-	color: var(--text-muted);
-	font-size: var(--font-ui-small);
-	font-weight: 600;
-	cursor: pointer;
-	box-shadow: none;
-	border-radius: 0;
-}
-
-.mh-settings-tab:hover { color: var(--text-normal); background: transparent; }
-
-.mh-settings-tab.is-active {
-	color: var(--text-accent);
-	border-bottom-color: var(--interactive-accent);
 }
 
 /* an inline warning under a setting (e.g. a very low timeout) */

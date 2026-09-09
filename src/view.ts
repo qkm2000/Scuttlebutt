@@ -535,6 +535,12 @@ export class ScuttlebuttView extends ItemView {
 	/** Update the streaming summary/reasoning in place, without a full re-render. */
 	updateStreaming(): void {
 		const s = this.s;
+		// The live stream targets exist only on the Summary tab. If the user has
+		// switched to Transcript/Memo mid-stream, there's nothing to update in place —
+		// and calling render() per token (to build a missing reasoning disclosure) would
+		// repaint the whole pane on every delta, which reads as flicker. The current
+		// summary/reasoning is read from the session when they switch back.
+		if (s.activeTab !== 'summary') return;
 		if (this.streamSummaryEl) {
 			this.writeStreaming(this.streamSummaryEl, s.summary);
 		}

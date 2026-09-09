@@ -8,14 +8,22 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Raised the minimum Obsidian version to 1.7.2, required by the sidebar
-  reveal API the plugin awaits when opening its view.
+- Settings now use Obsidian's declarative settings API (1.13+): every setting
+  is indexed by Obsidian's settings search, and the four sections
+  (Transcription, Summary, Capture, Output) are navigable pages. Recording,
+  transcription, and summarizing behavior is unchanged.
+- Raised the minimum Obsidian version to 1.13.0, required by the declarative
+  settings API and the sidebar reveal API. Users on older Obsidian continue to
+  receive 1.1.0.
 - The release workflow now runs ESLint (Obsidian's plugin-review ruleset), and a
   new CI workflow lints, typechecks, and tests on every push and pull request, so
   review issues are caught before a release is cut.
 
 ### Fixed
 
+- Switching to the Transcript or Memo tab while a summary was streaming made the
+  whole sidebar flicker (it re-rendered on every token). Streaming now updates in
+  place only on the Summary tab.
 - Resolved every Obsidian plugin-review finding, with no change in behavior:
   replaced direct element style assignment with CSS classes, dropped use of APIs
   newer than the declared minimum version, tightened types to remove unsafe `any`
