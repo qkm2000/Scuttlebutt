@@ -1,4 +1,4 @@
-import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
 import { formatDuration, normalizeTag, recordedMs, ReasoningLevel } from './utils';
 import { AUDIO_EXTENSIONS, MeetingSession, ReviewTab, VIEW_TYPE_SCUTTLEBUTT } from './types';
 import { ConfirmModal, FileSuggestModal, SaveChoiceModal } from './modals';
@@ -15,6 +15,9 @@ export class ScuttlebuttView extends ItemView {
 	// Live targets for a streaming summary, updated in place without a full re-render.
 	private streamSummaryEl: HTMLTextAreaElement | null = null;
 	private streamReasoningEl: HTMLElement | null = null;
+	// Per-element "follow the stream" flag (true = stick to bottom). A WeakMap keeps
+	// this off the DOM nodes and lets it be garbage-collected with them.
+	private readonly stick = new WeakMap<HTMLElement, boolean>();
 
 	constructor(leaf: WorkspaceLeaf, private plugin: ScuttlebuttPlugin) {
 		super(leaf);
@@ -497,7 +500,7 @@ export class ScuttlebuttView extends ItemView {
 			this.bindStreamScroll(area);
 		} else if (s.previewSummary && s.summary) {
 			const preview = body.createDiv('mh-markdown');
-			MarkdownRenderer.render(this.app, s.summary, preview, '', this as Component);
+			void MarkdownRenderer.render(this.app, s.summary, preview, '', this);
 		} else {
 			const area = body.createEl('textarea', {
 				cls: 'mh-textarea',
@@ -532,6 +535,12 @@ export class ScuttlebuttView extends ItemView {
 	/** Update the streaming summary/reasoning in place, without a full re-render. */
 	updateStreaming(): void {
 		const s = this.s;
+		// The live stream targets exist only on the Summary tab. If the user has
+		// switched to Transcript/Memo mid-stream, there's nothing to update in place —
+		// and calling render() per token (to build a missing reasoning disclosure) would
+		// repaint the whole pane on every delta, which reads as flicker. The current
+		// summary/reasoning is read from the session when they switch back.
+		if (s.activeTab !== 'summary') return;
 		if (this.streamSummaryEl) {
 			this.writeStreaming(this.streamSummaryEl, s.summary);
 		}
@@ -558,10 +567,10 @@ export class ScuttlebuttView extends ItemView {
 	 */
 	private writeStreaming(el: HTMLTextAreaElement | HTMLElement, text: string): void {
 		const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-		let stuck = (el as any)._stick !== false;
+		let stuck = this.stick.get(el) !== false;
 		if (stuck && dist > ScuttlebuttView.STREAM_STICK_PX) {
 			stuck = false; // user has scrolled up — stop following
-			(el as any)._stick = false;
+			this.stick.set(el, false);
 		}
 		const prev = el.scrollTop;
 		if (el instanceof HTMLTextAreaElement) el.value = text;
@@ -574,12 +583,12 @@ export class ScuttlebuttView extends ItemView {
 	 * immediately (any amount); scrolling back to the bottom re-attaches. Starts attached.
 	 */
 	private bindStreamScroll(el: HTMLElement): void {
-		(el as any)._stick = true;
+		this.stick.set(el, true);
 		el.addEventListener('wheel', (e: WheelEvent) => {
-			if (e.deltaY < 0) (el as any)._stick = false;
+			if (e.deltaY < 0) this.stick.set(el, false);
 		}, { passive: true });
 		el.addEventListener('scroll', () => {
-			if (el.scrollHeight - el.scrollTop - el.clientHeight < 4) (el as any)._stick = true;
+			if (el.scrollHeight - el.scrollTop - el.clientHeight < 4) this.stick.set(el, true);
 		});
 	}
 
@@ -626,11 +635,11 @@ export class ScuttlebuttView extends ItemView {
 				new SaveChoiceModal(
 					this.app,
 					prev,
-					() => this.plugin.saveNote('replace'),
-					() => this.plugin.saveNote('new')
+					() => void this.plugin.saveNote('replace'),
+					() => void this.plugin.saveNote('new')
 				).open();
 			} else {
-				this.plugin.saveNote('new');
+				void this.plugin.saveNote('new');
 			}
 		};
 
@@ -694,7 +703,7 @@ export class ScuttlebuttView extends ItemView {
 			new Notice('No audio files found in this vault.');
 			return;
 		}
-		new FileSuggestModal(this.app, files, (file) => this.plugin.importFromVault(file), 'Pick an audio clip…').open();
+		new FileSuggestModal(this.app, files, (file) => void this.plugin.importFromVault(file), 'Pick an audio clip…').open();
 	}
 
 	private uploadAudioFromDisk(): void {
@@ -710,7 +719,7 @@ export class ScuttlebuttView extends ItemView {
 		const chosen = new Set(this.s.contextFiles);
 		const files = this.app.vault.getMarkdownFiles().filter((f) => !chosen.has(f.path));
 		if (files.length === 0) {
-			new Notice('No more markdown files to add.');
+			new Notice('No more Markdown files to add.');
 			return;
 		}
 		new FileSuggestModal(

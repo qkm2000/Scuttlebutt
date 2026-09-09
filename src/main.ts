@@ -14,6 +14,7 @@
 import { Notice, Plugin, TFile, normalizePath } from 'obsidian';
 import {
 	calloutBlock,
+	errorMessage,
 	formatDuration,
 	recordedMs,
 	sanitizeFileName,
@@ -85,7 +86,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			name: 'Transcribe & summarize current recording',
 			checkCallback: (checking) => {
 				const can = !!this.session.audioData && !this.isBusy();
-				if (can && !checking) this.runPipeline();
+				if (can && !checking) void this.runPipeline();
 				return can;
 			},
 		});
@@ -94,7 +95,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			name: 'Save meeting note',
 			checkCallback: (checking) => {
 				const can = !!(this.session.summary || this.session.transcript) && !this.isBusy();
-				if (can && !checking) this.saveNote();
+				if (can && !checking) void this.saveNote();
 				return can;
 			},
 		});
@@ -102,8 +103,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.addSettingTab(new ScuttlebuttSettingTab(this.app, this));
 
 		this.statusBarEl = this.addStatusBarItem();
-		this.statusBarEl.addClass('mh-statusbar');
-		this.statusBarEl.style.display = 'none';
+		this.statusBarEl.addClass('mh-statusbar', 'mh-hidden');
 	}
 
 	onunload(): void {
@@ -112,7 +112,8 @@ export default class ScuttlebuttPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const saved = (await this.loadData()) as Partial<ScuttlebuttSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
 		this.ai = new AIService(this.settings);
 	}
 
@@ -127,7 +128,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 		try {
 			const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SCUTTLEBUTT);
 			if (existing.length > 0) {
-				this.app.workspace.revealLeaf(existing[0]);
+				await this.app.workspace.revealLeaf(existing[0]);
 				return;
 			}
 			const leaf = this.app.workspace.getRightLeaf(false);
@@ -136,10 +137,10 @@ export default class ScuttlebuttPlugin extends Plugin {
 				return;
 			}
 			await leaf.setViewState({ type: VIEW_TYPE_SCUTTLEBUTT, active: true });
-			this.app.workspace.revealLeaf(leaf);
+			await this.app.workspace.revealLeaf(leaf);
 		} catch (err) {
 			console.error('Scuttlebutt: failed to open sidebar', err);
-			new Notice('Failed to open sidebar: ' + (err as Error).message);
+			new Notice('Failed to open sidebar: ' + errorMessage(err));
 		}
 	}
 
@@ -209,8 +210,8 @@ export default class ScuttlebuttPlugin extends Plugin {
 				systemAudioDeviceId: this.settings.systemAudioDeviceId,
 				captureSystemAudio: this.settings.captureSystemAudio,
 			});
-		} catch (err: any) {
-			new Notice('Microphone access failed: ' + (err?.message ?? err));
+		} catch (err) {
+			new Notice('Microphone access failed: ' + errorMessage(err));
 			return;
 		}
 		if ((this.settings.systemAudioDeviceId || this.settings.captureSystemAudio) && !result.systemAudio) {
@@ -258,7 +259,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 		this.setStatus('recorded');
 		this.refreshViews();
 		new Notice('Recording saved. Transcribing…');
-		this.runPipeline();
+		void this.runPipeline();
 	}
 
 	togglePause(): void {
@@ -291,9 +292,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.session.audioSourcePath = file.path;
 			this.setStatus('recorded');
 			this.refreshViews();
-			this.runPipeline();
-		} catch (err: any) {
-			new Notice('Could not read audio file: ' + (err?.message ?? err));
+			void this.runPipeline();
+		} catch (err) {
+			new Notice('Could not read audio file: ' + errorMessage(err));
 		}
 	}
 
@@ -308,9 +309,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.setStatus('recorded');
 			await this.activateView();
 			this.refreshViews();
-			this.runPipeline();
-		} catch (err: any) {
-			new Notice('Could not read audio file: ' + (err?.message ?? err));
+			void this.runPipeline();
+		} catch (err) {
+			new Notice('Could not read audio file: ' + errorMessage(err));
 		}
 	}
 
@@ -402,12 +403,12 @@ export default class ScuttlebuttPlugin extends Plugin {
 				this.refreshViews();
 				result = await this.ai.transcribe(s.audioData, name, s.audioMime, false, controller.signal);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			if (controller.signal.aborted) {
 				this.finishCancelled();
 				return false;
 			}
-			s.error = err?.message ?? String(err);
+			s.error = errorMessage(err);
 			this.setStatus('error');
 			this.setProgress('', 0);
 			this.refreshViews();
@@ -478,7 +479,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.setProgress(piece === 'title' ? 'Title updated.' : 'Tags updated.', 100);
 			this.refreshViews();
 			window.setTimeout(() => this.clearProgressIfIdle(), 3000);
-		} catch (err: any) {
+		} catch (err) {
 			if (controller.signal.aborted) {
 				this.finishCancelled();
 				return;
@@ -486,7 +487,7 @@ export default class ScuttlebuttPlugin extends Plugin {
 			this.setStatus(s.summary ? 'ready' : 'recorded');
 			this.setProgress('', 0);
 			this.refreshViews();
-			new Notice(`${piece === 'title' ? 'Title' : 'Tag'} generation failed: ${err?.message ?? err}`);
+			new Notice(`${piece === 'title' ? 'Title' : 'Tag'} generation failed: ${errorMessage(err)}`);
 		} finally {
 			if (this.activeController === controller) this.activeController = null;
 		}
@@ -529,12 +530,12 @@ export default class ScuttlebuttPlugin extends Plugin {
 				);
 				s.summary = result.summary;
 				s.reasoning = result.reasoning;
-			} catch (err: any) {
+			} catch (err) {
 				if (controller.signal.aborted) {
 					this.finishCancelled();
 					return;
 				}
-				s.error = err?.message ?? String(err);
+				s.error = errorMessage(err);
 				this.setStatus('error');
 				this.setProgress('', 0);
 				this.refreshViews();
@@ -671,11 +672,11 @@ export default class ScuttlebuttPlugin extends Plugin {
 			new Notice('Meeting note saved: ' + notePath);
 
 			if (this.settings.autoOpenNote) {
-				this.app.workspace.openLinkText(notePath, '', true);
+				void this.app.workspace.openLinkText(notePath, '', true);
 			}
 			window.setTimeout(() => this.clearProgressIfIdle(), 4000);
-		} catch (err: any) {
-			s.error = 'Could not save note: ' + (err?.message ?? err);
+		} catch (err) {
+			s.error = 'Could not save note: ' + errorMessage(err);
 			this.setStatus('error');
 			this.setProgress('', 0);
 			this.refreshViews();
@@ -787,20 +788,20 @@ export default class ScuttlebuttPlugin extends Plugin {
 			window.clearInterval(this.statusBarTimer);
 			this.statusBarTimer = null;
 		}
-		if (this.statusBarEl) this.statusBarEl.style.display = 'none';
+		if (this.statusBarEl) this.statusBarEl.addClass('mh-hidden');
 	}
 
 	private updateStatusBar(): void {
 		if (!this.statusBarEl) return;
 		if (this.session.status === 'recording') {
-			this.statusBarEl.style.display = '';
+			this.statusBarEl.removeClass('mh-hidden');
 			this.statusBarEl.empty();
 			this.statusBarEl.createSpan({ cls: 'mh-sb-dot' });
 			const t = formatDuration(recordedMs(this.session.activeMs, this.session.segmentStartedAt, Date.now()));
 			this.statusBarEl.createSpan({ text: ' ' + t + (this.session.paused ? ' (paused)' : '') });
 			this.statusBarEl.onclick = () => this.activateView();
 		} else {
-			this.statusBarEl.style.display = 'none';
+			this.statusBarEl.addClass('mh-hidden');
 		}
 	}
 }

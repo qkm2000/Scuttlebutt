@@ -46,7 +46,7 @@ export function todayStamp(d: Date): string {
 /** Strip characters that are illegal in file names or that anarlog forbids in titles. */
 export function sanitizeTitle(raw: string): string {
 	return raw
-		.replace(/[\*"'`\(\)\[\]\{\}:;\\/<>|?]/g, '')
+		.replace(/[*"'`()[\]{}:;\\/<>|?]/g, '')
 		.replace(/\s+/g, ' ')
 		.trim();
 }
@@ -55,7 +55,7 @@ export function sanitizeTitle(raw: string): string {
 export function sanitizeFileName(raw: string): string {
 	return (
 		raw
-			.replace(/[\\/:*?"<>|#\^\[\]]/g, '')
+			.replace(/[\\/:*?"<>|#^[\]]/g, '')
 			.replace(/\s+/g, ' ')
 			.trim()
 			.slice(0, 120) || 'Meeting'
@@ -147,12 +147,34 @@ export function stripCodeFences(text: string): string {
 	return fence ? fence[1].trim() : trimmed;
 }
 
+/** A JSON object of unknown shape. */
+type JsonRecord = Record<string, unknown>;
+
+export function isRecord(value: unknown): value is JsonRecord {
+	return typeof value === 'object' && value !== null;
+}
+
+/** Coerce an unknown JSON value to text, treating non-primitives as empty. */
+export function str(value: unknown): string {
+	if (typeof value === 'string') return value;
+	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+	return '';
+}
+
+/** Extract a human-readable message from an unknown thrown value. */
+export function errorMessage(err: unknown): string {
+	if (err instanceof Error) return err.message;
+	if (typeof err === 'string') return err;
+	if (isRecord(err) && typeof err.message === 'string') return err.message;
+	return 'Unknown error';
+}
+
 /** Best-effort extraction of a JSON string array from a model response. */
 export function parseTagArray(text: string): string[] {
 	const attempt = (s: string): string[] | null => {
 		try {
-			const parsed = JSON.parse(s);
-			if (Array.isArray(parsed)) return parsed.map((x) => String(x));
+			const parsed: unknown = JSON.parse(s);
+			if (Array.isArray(parsed)) return (parsed as unknown[]).map((x) => String(x));
 		} catch {
 			/* fall through */
 		}
@@ -173,7 +195,7 @@ export function parseTagArray(text: string): string[] {
  * `Speaker 2`, … in order of first appearance, and consecutive segments from the
  * same speaker are merged into a single turn.
  */
-export function formatDiarizedSegments(segments: any[]): string {
+export function formatDiarizedSegments(segments: unknown[]): string {
 	const labels = new Map<string, string>();
 	const label = (raw: string): string => {
 		if (!labels.has(raw)) labels.set(raw, `Speaker ${labels.size + 1}`);
@@ -181,9 +203,10 @@ export function formatDiarizedSegments(segments: any[]): string {
 	};
 	const turns: { who: string; text: string }[] = [];
 	for (const seg of segments) {
-		const text = String(seg?.text ?? '').trim();
+		const rec = isRecord(seg) ? seg : {};
+		const text = str(rec.text).trim();
 		if (!text) continue;
-		const who = seg?.speaker ? label(String(seg.speaker)) : 'Unknown speaker';
+		const who = rec.speaker ? label(str(rec.speaker)) : 'Unknown speaker';
 		const last = turns[turns.length - 1];
 		if (last && last.who === who) last.text += ' ' + text;
 		else turns.push({ who, text });
@@ -191,11 +214,16 @@ export function formatDiarizedSegments(segments: any[]): string {
 	return turns.map((t) => `${t.who}: ${t.text}`).join('\n').trim();
 }
 
+/** A per-segment speaker label, present only when the response was diarized. */
+function segmentHasSpeaker(seg: unknown): boolean {
+	return isRecord(seg) && !!seg.speaker;
+}
+
 /** True if a transcription response body carries any per-segment speaker labels. */
 export function responseHasSpeakers(rawText: string): boolean {
 	try {
-		const data = JSON.parse(rawText);
-		return Array.isArray(data.segments) && data.segments.some((s: any) => s && s.speaker);
+		const data: unknown = JSON.parse(rawText);
+		return isRecord(data) && Array.isArray(data.segments) && data.segments.some(segmentHasSpeaker);
 	} catch {
 		return false;
 	}
@@ -203,30 +231,44 @@ export function responseHasSpeakers(rawText: string): boolean {
 
 /** Parse a transcription API response body into plain text, tolerating many shapes. */
 export function parseTranscriptResponse(rawText: string): string {
-	let data: any;
+	let data: unknown;
 	try {
 		data = JSON.parse(rawText);
 	} catch {
 		return rawText.trim();
 	}
 	if (typeof data === 'string') return data.trim();
+	if (!isRecord(data)) return rawText.trim();
+	const segments = Array.isArray(data.segments) ? data.segments : null;
 	// Speaker-labeled segments (diarization) take priority — otherwise we'd flatten
 	// the transcript and lose the "who said what" the diarizer worked to produce.
-	if (Array.isArray(data.segments) && data.segments.some((s: any) => s && s.speaker)) {
-		return formatDiarizedSegments(data.segments);
+	if (segments && segments.some(segmentHasSpeaker)) {
+		return formatDiarizedSegments(segments);
 	}
-	if (data.text) return String(data.text).trim();
-	if (Array.isArray(data.segments)) return data.segments.map((s: any) => s.text).join(' ').trim();
-	if (data.transcript) return String(data.transcript).trim();
-	if (data.results?.channels?.[0]?.alternatives?.[0]?.transcript) {
-		return String(data.results.channels[0].alternatives[0].transcript).trim();
+	if (data.text) return str(data.text).trim();
+	if (segments) {
+		return segments.map((s) => (isRecord(s) ? str(s.text) : '')).join(' ').trim();
 	}
+	if (data.transcript) return str(data.transcript).trim();
+	const deep = deepTranscript(data);
+	if (deep !== null) return deep.trim();
 	return rawText.trim();
+}
+
+/** Pull `results.channels[0].alternatives[0].transcript` (Deepgram-style) if present. */
+function deepTranscript(data: JsonRecord): string | null {
+	const results = data.results;
+	if (!isRecord(results) || !Array.isArray(results.channels)) return null;
+	const channel = (results.channels as unknown[])[0];
+	if (!isRecord(channel) || !Array.isArray(channel.alternatives)) return null;
+	const alt = (channel.alternatives as unknown[])[0];
+	if (!isRecord(alt) || alt.transcript == null) return null;
+	return str(alt.transcript);
 }
 
 /** Quote a value for YAML frontmatter when it contains characters that need it. */
 export function yamlString(value: string): string {
-	if (/[:#\[\]{}",&*!|>%@`\\]/.test(value) || /^\s|\s$/.test(value)) {
+	if (/[:#[\]{}",&*!|>%@`\\]/.test(value) || /^\s|\s$/.test(value)) {
 		return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 	}
 	return value;

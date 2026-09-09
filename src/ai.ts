@@ -1,6 +1,8 @@
 import { requestUrl } from 'obsidian';
 import {
 	buildMultipart,
+	errorMessage,
+	isRecord,
 	joinUrl,
 	normalizeTag,
 	parseTagArray,
@@ -10,6 +12,7 @@ import {
 	responseHasSpeakers,
 	sanitizeTitle,
 	splitReasoning,
+	str,
 	stripCodeFences,
 	stripThink,
 	todayStamp,
@@ -28,6 +31,13 @@ const TEST_TIMEOUT = 10_000;
  */
 function safeTimeoutMs(seconds: number): number {
 	return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 300_000;
+}
+
+/** The first `choices[0]` entry of an OpenAI-style response, as a record, if present. */
+function firstChoice(data: unknown): Record<string, unknown> | undefined {
+	if (!isRecord(data) || !Array.isArray(data.choices)) return undefined;
+	const first = (data.choices as unknown[])[0];
+	return isRecord(first) ? first : undefined;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label = 'Request'): Promise<T> {
@@ -65,21 +75,25 @@ export async function testEndpoint(endpoint: string, apiKey: string): Promise<Te
 		if (resp.status < 200 || resp.status >= 300) {
 			return { ok: false, message: `HTTP ${resp.status}: ${truncate(resp.text, 120)}`, models: [] };
 		}
-		let data: any;
+		let data: unknown;
 		try {
 			data = resp.json;
 		} catch {
 			return { ok: false, message: 'Endpoint replied but not with JSON — check the URL ends in /v1', models: [] };
 		}
-		const list: ModelOption[] = (data?.data ?? [])
-			.map((m: any) => ({ id: String(m.id), name: String(m.id) }))
-			.filter((m: ModelOption) => m.id);
+		const rawList = isRecord(data) && Array.isArray(data.data) ? (data.data as unknown[]) : [];
+		const list: ModelOption[] = rawList
+			.map((m) => {
+				const id = isRecord(m) ? str(m.id) : '';
+				return { id, name: id };
+			})
+			.filter((m) => m.id);
 		if (list.length === 0) {
 			return { ok: false, message: 'Connected, but the server listed no models', models: [] };
 		}
 		return { ok: true, message: `${list.length} model${list.length === 1 ? '' : 's'} available`, models: list };
-	} catch (err: any) {
-		return { ok: false, message: err?.message ?? String(err), models: [] };
+	} catch (err) {
+		return { ok: false, message: errorMessage(err), models: [] };
 	}
 }
 
@@ -135,9 +149,12 @@ export class AIService {
 				  }, timeoutMs)
 				: null;
 		try {
-			const resp = await fetch(url, { method: 'POST', headers, body, signal: controller.signal });
+			// window.fetch (not Obsidian's requestUrl) because only fetch can be aborted
+			// mid-flight via `signal`; requestUrl is uncancellable. It's used only as the
+			// CORS fallback below, where cancellation is unavailable anyway.
+			const resp = await window.fetch(url, { method: 'POST', headers, body, signal: controller.signal });
 			return { status: resp.status, text: await resp.text() };
-		} catch (err) {
+		} catch {
 			if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
 			if (timedOut) throw new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`);
 			// Not an abort and not a timeout — most often a CORS/network failure. Retry
@@ -238,15 +255,16 @@ export class AIService {
 		if (resp.status < 200 || resp.status >= 300) {
 			throw new Error(`LLM request failed (HTTP ${resp.status}): ${truncate(resp.text, 200)}`);
 		}
-		let data: any;
+		let data: unknown;
 		try {
 			data = JSON.parse(resp.text);
 		} catch {
 			throw new Error('LLM endpoint returned a non-JSON response.');
 		}
-		const msg = data.choices?.[0]?.message ?? {};
-		const content = String(msg.content ?? data.choices?.[0]?.text ?? '');
-		const reasoningField = String(msg.reasoning_content ?? msg.reasoning ?? '');
+		const choice = firstChoice(data);
+		const msg = isRecord(choice?.message) ? choice.message : {};
+		const content = str(msg.content) || str(choice?.text);
+		const reasoningField = str(msg.reasoning_content) || str(msg.reasoning);
 		return { content, reasoning: reasoningField };
 	}
 
@@ -310,7 +328,9 @@ export class AIService {
 		};
 
 		try {
-			const resp = await fetch(env.url, {
+			// window.fetch (not Obsidian's requestUrl) because requestUrl can neither stream
+			// an SSE response nor be aborted mid-flight; both are essential here.
+			const resp = await window.fetch(env.url, {
 				method: 'POST',
 				headers,
 				body: JSON.stringify({
@@ -348,8 +368,9 @@ export class AIService {
 					const data = line.slice(5).trim();
 					if (data === '[DONE]') continue;
 					try {
-						const json = JSON.parse(data);
-						const delta = json.choices?.[0]?.delta ?? {};
+						const json: unknown = JSON.parse(data);
+						const choice = firstChoice(json);
+						const delta = isRecord(choice?.delta) ? choice.delta : {};
 						if (typeof delta.content === 'string') contentRaw += delta.content;
 						if (typeof delta.reasoning_content === 'string') reasoningField += delta.reasoning_content;
 						else if (typeof delta.reasoning === 'string') reasoningField += delta.reasoning;
@@ -366,7 +387,7 @@ export class AIService {
 			if (!c.answer && !c.reasoning) throw new Error('No streamed content received.');
 			onDelta(c.answer, c.reasoning);
 			return c;
-		} catch (err: any) {
+		} catch (err) {
 			if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
 			if (timedOut) throw new Error(`Summary timed out after ${Math.round(timeoutMs / 1000)}s`);
 			throw err;
@@ -414,11 +435,11 @@ export class AIService {
 			try {
 				const r = await this.chatStream(system, user, 8192, 0.3, opts.onDelta, opts.signal, opts.reasoning);
 				return { summary: stripCodeFences(r.answer), reasoning: r.reasoning };
-			} catch (err: any) {
+			} catch (err) {
 				// A cancel or timeout is terminal; anything else (e.g. a server without CORS
 				// that can't stream over fetch) falls back to a one-shot request.
-				if (err?.name === 'AbortError' || opts.signal?.aborted) throw err;
-				if (/timed out/i.test(err?.message ?? '')) throw err;
+				if ((err instanceof Error && err.name === 'AbortError') || opts.signal?.aborted) throw err;
+				if (/timed out/i.test(errorMessage(err))) throw err;
 				console.warn('Scuttlebutt: streaming failed, falling back to a one-shot request', err);
 			}
 		}
