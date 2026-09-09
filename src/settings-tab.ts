@@ -225,7 +225,9 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 	): Setting {
 		const min = opts?.min ?? 0;
 		let text!: TextComponent;
-		const setting = new Setting(el).setName(name).setDesc(desc).addText((t) => {
+		const setting = new Setting(el).setName(name);
+		if (desc) setting.setDesc(desc);
+		setting.addText((t) => {
 			text = t;
 			t.inputEl.type = 'number';
 			t.inputEl.min = String(min);
@@ -374,7 +376,18 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 						'English is recommended for the most reliable results.'
 				)
 		);
+		new Setting(el).setName('Summary prompt').setHeading();
+		this.renderSummaryPrompt(
+			new Setting(el)
+				.setName('System prompt')
+				.setDesc('Sent as the system message. Use {{language}} where the language should appear.')
+		);
+
 		const budgets = this.collapsibleSection(el, 'Token budgets (advanced)');
+		budgets.createEl('p', {
+			cls: 'mh-hint',
+			text: 'Larger budgets cost more tokens and time. If a budget is too small, the model can run out of room and leave the text incomplete.',
+		});
 		this.numberRow(
 			budgets,
 			'Summary length limit',
@@ -385,30 +398,27 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			},
 			{ min: 256, step: 256, resetTo: DEFAULT_SUMMARY_MAX_TOKENS }
 		);
-		const budgetDesc = 'Extra tokens reserved for thinking at this effort level (added on top of the summary limit).';
+		new Setting(budgets).setName('Reasoning headroom').setHeading();
+		budgets.createEl('p', {
+			cls: 'mh-hint',
+			text: 'Extra tokens reserved for thinking at each effort level, added on top of the summary limit. Only used when reasoning is enabled.',
+		});
 		const budgetRow = (name: string, level: Exclude<ReasoningLevel, 'off'>) =>
 			this.numberRow(
 				budgets,
 				name,
-				budgetDesc,
+				'',
 				() => s.reasoningBudgets[level],
 				(v) => {
 					s.reasoningBudgets[level] = v;
 				},
 				{ min: 0, step: 512, resetTo: DEFAULT_REASONING_BUDGETS[level] }
 			);
-		budgetRow('Reasoning headroom (low)', 'low');
-		budgetRow('Reasoning headroom (medium)', 'medium');
-		budgetRow('Reasoning headroom (high)', 'high');
-		budgetRow('Reasoning headroom (extra high)', 'xhigh');
-		budgetRow('Reasoning headroom (max)', 'max');
-
-		new Setting(el).setName('Summary prompt').setHeading();
-		this.renderSummaryPrompt(
-			new Setting(el)
-				.setName('System prompt')
-				.setDesc('Sent as the system message. Use {{language}} where the language should appear.')
-		);
+		budgetRow('Low', 'low');
+		budgetRow('Medium', 'medium');
+		budgetRow('High', 'high');
+		budgetRow('Extra high', 'xhigh');
+		budgetRow('Max', 'max');
 	}
 
 	private buildCapture(el: HTMLElement): void {
@@ -577,6 +587,9 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 
 	private renderApiKey(setting: Setting, opts: EndpointOpts): void {
 		const settings = this.plugin.settings;
+		// Keys are stored in Obsidian's secret storage via the plugin, not written to
+		// settings/data.json directly. The masked field + reset behave exactly as before.
+		const which = opts.apiKeyKey === 'sttApiKey' ? 'stt' : 'llm';
 		let keyText!: TextComponent;
 		setting
 			.addText((t) => {
@@ -585,7 +598,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 				t.setPlaceholder('sk-…')
 					.setValue(settings[opts.apiKeyKey])
 					.onChange(async (v) => {
-						settings[opts.apiKeyKey] = v.trim();
+						this.plugin.setApiKey(which, v.trim());
 						await this.plugin.saveSettings();
 					});
 			})
@@ -594,7 +607,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 					.setIcon('rotate-ccw')
 					.setTooltip('Reset to default (clears the key)')
 					.onClick(async () => {
-						settings[opts.apiKeyKey] = DEFAULT_SETTINGS[opts.apiKeyKey];
+						this.plugin.setApiKey(which, DEFAULT_SETTINGS[opts.apiKeyKey]);
 						await this.plugin.saveSettings();
 						keyText.setValue(settings[opts.apiKeyKey]);
 					})

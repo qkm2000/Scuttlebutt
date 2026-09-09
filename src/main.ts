@@ -43,6 +43,10 @@ import { AIService } from './ai';
 import { ScuttlebuttView } from './view';
 import { ScuttlebuttSettingTab } from './settings-tab';
 
+// API keys live in Obsidian's secret storage (OS keychain), not data.json.
+const STT_KEY_ID = 'scuttlebutt-stt-api-key';
+const LLM_KEY_ID = 'scuttlebutt-llm-api-key';
+
 export default class ScuttlebuttPlugin extends Plugin {
 	declare settings: ScuttlebuttSettings;
 	session: MeetingSession = newSession();
@@ -54,6 +58,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 	// its own AbortController; catch handlers classify a user abort via controller.signal.aborted.
 	private activeController: AbortController | null = null;
 	private startingRecording = false;
+	// Cleared if secret storage is unavailable, so we fall back to keeping the keys
+	// in data.json rather than losing them.
+	private secretStorageOk = true;
 
 	/** True while a transcription, summary, or save is running. */
 	isBusy(): boolean {
@@ -131,14 +138,52 @@ export default class ScuttlebuttPlugin extends Plugin {
 			DEFAULT_REASONING_BUDGETS,
 			saved?.reasoningBudgets
 		);
+		// API keys live in secret storage. Load them into the in-memory settings (which
+		// AIService reads), migrating any plaintext key left in data.json by older versions.
+		let migrated = false;
+		const loadKey = (id: string, plaintext: string): string => {
+			try {
+				const secret = this.app.secretStorage.getSecret(id);
+				if (secret !== null) return secret;
+				if (plaintext) {
+					this.app.secretStorage.setSecret(id, plaintext);
+					migrated = true;
+				}
+				return plaintext;
+			} catch {
+				this.secretStorageOk = false;
+				return plaintext;
+			}
+		};
+		this.settings.sttApiKey = loadKey(STT_KEY_ID, this.settings.sttApiKey);
+		this.settings.llmApiKey = loadKey(LLM_KEY_ID, this.settings.llmApiKey);
 		this.ai = new AIService(this.settings);
+		// Re-save once after a migration so the plaintext key is scrubbed from data.json.
+		if (migrated && this.secretStorageOk) await this.saveSettings();
 	}
 
 	async saveSettings(): Promise<void> {
 		// Persist only. AIService holds `settings` by reference (mutated in place), so it needs
 		// no rebuild; and the sidebar reads session state, not settings, so no re-render is
 		// needed here. Re-rendering per keystroke rebuilt the audio Blob and reset playback.
-		await this.saveData(this.settings);
+		// API keys are blanked before persisting so they never touch data.json (unless secret
+		// storage is unavailable, in which case we keep them to avoid data loss).
+		const data: ScuttlebuttSettings = this.secretStorageOk
+			? { ...this.settings, sttApiKey: '', llmApiKey: '' }
+			: this.settings;
+		await this.saveData(data);
+	}
+
+	/** Store an API key in secret storage and mirror it into the in-memory settings. */
+	setApiKey(which: 'stt' | 'llm', value: string): void {
+		const id = which === 'stt' ? STT_KEY_ID : LLM_KEY_ID;
+		if (which === 'stt') this.settings.sttApiKey = value;
+		else this.settings.llmApiKey = value;
+		try {
+			this.app.secretStorage.setSecret(id, value);
+		} catch {
+			this.secretStorageOk = false;
+		}
 	}
 
 	/**
