@@ -903,6 +903,45 @@
 	line-height: 1.5;
 }
 
+/* ---- settings tabs ----------------------------------------------------- */
+
+.mh-settings-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 16px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mh-settings-tab {
+	appearance: none;
+	background: transparent;
+	border: none;
+	border-bottom: 2px solid transparent;
+	margin-bottom: -1px;
+	padding: 8px 12px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: none;
+	border-radius: 0;
+}
+
+.mh-settings-tab:hover { color: var(--text-normal); background: transparent; }
+
+.mh-settings-tab.is-active {
+	color: var(--text-accent);
+	border-bottom-color: var(--interactive-accent);
+}
+
+/* an inline warning under a setting (e.g. a very low timeout) */
+.mh-warn {
+	margin-top: 4px;
+	color: #d9822b;
+	font-size: var(--font-ui-smaller);
+}
+
 /* ---- status bar -------------------------------------------------------- */
 
 .mh-statusbar { cursor: pointer; }

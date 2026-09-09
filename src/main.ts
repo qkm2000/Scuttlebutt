@@ -201,6 +201,15 @@ const TEST_TIMEOUT = 10_000;
 
 // Race a promise against a timeout. `ms <= 0` disables the timeout (wait
 // indefinitely) — used when a server's timeout is configured to 0.
+/**
+ * Milliseconds for a configured timeout (in seconds), guarding a corrupt/blank value.
+ * 0 means "wait indefinitely"; anything not a finite number >= 0 falls back to 300s so a
+ * bad `data.json` can't turn every request into an instant NaN-timeout failure.
+ */
+function safeTimeoutMs(seconds: number): number {
+	return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 300_000;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label = 'Request'): Promise<T> {
 	if (!ms || ms <= 0) return promise;
 	return Promise.race([
@@ -534,7 +543,7 @@ class AIService {
 			joinUrl(this.settings.sttEndpoint, 'audio/transcriptions'),
 			headers,
 			body,
-			this.settings.sttTimeout * 1000,
+			safeTimeoutMs(this.settings.sttTimeout),
 			'Transcription',
 			signal
 		);
@@ -580,7 +589,7 @@ class AIService {
 				temperature,
 				...env.params,
 			}),
-			this.settings.llmTimeout * 1000,
+			safeTimeoutMs(this.settings.llmTimeout),
 			'Summary',
 			signal
 		);
@@ -635,7 +644,7 @@ class AIService {
 			if (signal.aborted) controller.abort();
 			else signal.addEventListener('abort', onExternalAbort, { once: true });
 		}
-		const timeoutMs = this.settings.llmTimeout * 1000;
+		const timeoutMs = safeTimeoutMs(this.settings.llmTimeout);
 		let timedOut = false;
 		// Idle timeout: reset on every chunk so a healthy (but slow) stream is never cut;
 		// only a genuine stall — no token for the whole window — aborts it.
@@ -2506,10 +2515,13 @@ export default class ScuttlebuttPlugin extends Plugin {
 // Settings tab
 // ---------------------------------------------------------------------------
 
+type SettingsTab = 'transcription' | 'summary' | 'capture' | 'output';
+
 class ScuttlebuttSettingTab extends PluginSettingTab {
 	private audioInputs: AudioInput[] = [];
 	private deviceDropdown: DropdownComponent | null = null;
 	private systemDeviceDropdown: DropdownComponent | null = null;
+	private activeSettingsTab: SettingsTab = 'transcription';
 
 	constructor(app: App, private plugin: ScuttlebuttPlugin) {
 		super(app, plugin);
@@ -2569,6 +2581,33 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 		// show immediately on open, even before (or without) a fresh detect.
 		if (this.audioInputs.length === 0) this.audioInputs = this.plugin.settings.audioDevices ?? [];
 
+		// Group settings into tabs so the page is scannable instead of one long scroll.
+		const defs: { id: SettingsTab; label: string; render: (el: HTMLElement) => void }[] = [
+			{ id: 'transcription', label: 'Transcription', render: (el) => this.renderTranscriptionSettings(el) },
+			{ id: 'summary', label: 'Summary', render: (el) => this.renderSummarySettings(el) },
+			{ id: 'capture', label: 'Capture', render: (el) => this.renderCaptureSettings(el) },
+			{ id: 'output', label: 'Output', render: (el) => this.renderOutputSettings(el) },
+		];
+		const bar = containerEl.createDiv('mh-settings-tabs');
+		const panels = new Map<SettingsTab, HTMLElement>();
+		const buttons = new Map<SettingsTab, HTMLElement>();
+		const activate = (id: SettingsTab) => {
+			this.activeSettingsTab = id;
+			buttons.forEach((btn, tid) => btn.toggleClass('is-active', tid === id));
+			panels.forEach((panel, tid) => (panel.style.display = tid === id ? '' : 'none'));
+		};
+		for (const def of defs) {
+			const btn = bar.createEl('button', { cls: 'mh-settings-tab', text: def.label });
+			btn.onclick = () => activate(def.id);
+			buttons.set(def.id, btn);
+			const panel = containerEl.createDiv('mh-settings-panel');
+			panels.set(def.id, panel);
+			def.render(panel);
+		}
+		activate(this.activeSettingsTab);
+	}
+
+	private renderTranscriptionSettings(containerEl: HTMLElement): void {
 		this.endpointSection(containerEl, {
 			heading: 'Transcription',
 			desc: 'Your Whisper / vLLM speech-to-text server (OpenAI-compatible).',
@@ -2602,7 +2641,9 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 			);
+	}
 
+	private renderSummarySettings(containerEl: HTMLElement): void {
 		this.endpointSection(containerEl, {
 			heading: 'Summary',
 			desc: 'Your LLM / vLLM chat server (OpenAI-compatible). Used for summaries, titles, and tags.',
@@ -2649,8 +2690,90 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl).setName('Capture').setHeading();
+		new Setting(containerEl)
+			.setName('Auto-summarize after transcription')
+			.setDesc('Generate the summary automatically once a transcript is ready.')
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.autoSummarize).onChange(async (v) => {
+					this.plugin.settings.autoSummarize = v;
+					await this.plugin.saveSettings();
+				})
+			);
 
+		new Setting(containerEl)
+			.setName('Suggest a title')
+			.setDesc('Let the model name the meeting (anarlog-style concise topic).')
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.generateTitle).onChange(async (v) => {
+					this.plugin.settings.generateTitle = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Suggest tags')
+			.setDesc('Let the model propose 3–5 tags, reusing your existing vault tags where relevant.')
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.generateTags).onChange(async (v) => {
+					this.plugin.settings.generateTags = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		let langText!: TextComponent;
+		new Setting(containerEl)
+			.setName('Summary language')
+			.setDesc(
+				'The language the summary and title are written in. Support depends on your LLM backend; ' +
+					'English is recommended for the most reliable results.'
+			)
+			.addText((t) => {
+				langText = t;
+				t.setValue(this.plugin.settings.language).onChange(async (v) => {
+					this.plugin.settings.language = v.trim() || 'English';
+					await this.plugin.saveSettings();
+				});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to English')
+					.onClick(async () => {
+						this.plugin.settings.language = 'English';
+						await this.plugin.saveSettings();
+						langText.setValue('English');
+					})
+			);
+
+		new Setting(containerEl).setName('Summary prompt').setHeading();
+		let promptArea!: TextAreaComponent;
+		new Setting(containerEl)
+			.setName('System prompt')
+			.setDesc('Sent as the system message. Use {{language}} where the language should appear.')
+			.addTextArea((t) => {
+				promptArea = t;
+				t.setValue(this.plugin.settings.summaryPrompt).onChange(async (v) => {
+					this.plugin.settings.summaryPrompt = v;
+					await this.plugin.saveSettings();
+				});
+				t.inputEl.rows = 10;
+				t.inputEl.addClass('mh-settings-textarea');
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						this.plugin.settings.summaryPrompt = DEFAULT_SUMMARY_PROMPT;
+						await this.plugin.saveSettings();
+						// Update in place instead of this.display(), which would jump the
+						// settings page back to the top.
+						promptArea.setValue(DEFAULT_SUMMARY_PROMPT);
+					})
+			);
+	}
+
+	private renderCaptureSettings(containerEl: HTMLElement): void {
 		new Setting(containerEl)
 			.setName('Input device')
 			.setDesc(
@@ -2708,51 +2831,9 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 			);
+	}
 
-		new Setting(containerEl).setName('Behavior').setHeading();
-
-		new Setting(containerEl)
-			.setName('Auto-summarize after transcription')
-			.setDesc('Generate the summary automatically once a transcript is ready.')
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.autoSummarize).onChange(async (v) => {
-					this.plugin.settings.autoSummarize = v;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName('Suggest a title')
-			.setDesc('Let the model name the meeting (anarlog-style concise topic).')
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.generateTitle).onChange(async (v) => {
-					this.plugin.settings.generateTitle = v;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName('Suggest tags')
-			.setDesc('Let the model propose 3–5 tags, reusing your existing vault tags where relevant.')
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.generateTags).onChange(async (v) => {
-					this.plugin.settings.generateTags = v;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName('Summary language')
-			.setDesc('The language the summary and title are written in.')
-			.addText((t) =>
-				t.setValue(this.plugin.settings.language).onChange(async (v) => {
-					this.plugin.settings.language = v.trim() || 'English';
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl).setName('Output').setHeading();
-
+	private renderOutputSettings(containerEl: HTMLElement): void {
 		new Setting(containerEl)
 			.setName('Notes folder')
 			.setDesc('Where meeting notes are written.')
@@ -2828,33 +2909,6 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					this.plugin.settings.autoOpenNote = v;
 					await this.plugin.saveSettings();
 				})
-			);
-
-		new Setting(containerEl).setName('Summary prompt').setHeading();
-		let promptArea!: TextAreaComponent;
-		new Setting(containerEl)
-			.setName('System prompt')
-			.setDesc('Sent as the system message. Use {{language}} where the language should appear.')
-			.addTextArea((t) => {
-				promptArea = t;
-				t.setValue(this.plugin.settings.summaryPrompt).onChange(async (v) => {
-					this.plugin.settings.summaryPrompt = v;
-					await this.plugin.saveSettings();
-				});
-				t.inputEl.rows = 10;
-				t.inputEl.addClass('mh-settings-textarea');
-			})
-			.addExtraButton((b) =>
-				b
-					.setIcon('rotate-ccw')
-					.setTooltip('Reset to default')
-					.onClick(async () => {
-						this.plugin.settings.summaryPrompt = DEFAULT_SUMMARY_PROMPT;
-						await this.plugin.saveSettings();
-						// Update in place instead of this.display(), which would jump the
-						// settings page back to the top.
-						promptArea.setValue(DEFAULT_SUMMARY_PROMPT);
-					})
 			);
 	}
 
@@ -2945,6 +2999,13 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 
 		const timeoutKey = opts.timeoutKey;
 		let timeoutText!: TextComponent;
+		let timeoutWarn: HTMLElement | null = null;
+		const updateTimeoutWarn = () => {
+			if (!timeoutWarn) return;
+			const n = settings[timeoutKey];
+			const low = Number.isFinite(n) && n > 0 && n < 20;
+			timeoutWarn.style.display = low ? '' : 'none';
+		};
 		new Setting(containerEl)
 			.setName('Request timeout')
 			.setDesc(
@@ -2961,6 +3022,7 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 					if (Number.isFinite(n) && n >= 0) {
 						settings[timeoutKey] = Math.floor(n);
 						await this.plugin.saveSettings();
+						updateTimeoutWarn();
 					}
 				});
 			})
@@ -2972,8 +3034,14 @@ class ScuttlebuttSettingTab extends PluginSettingTab {
 						settings[timeoutKey] = DEFAULT_SETTINGS[timeoutKey];
 						await this.plugin.saveSettings();
 						timeoutText.setValue(String(settings[timeoutKey]));
+						updateTimeoutWarn();
 					})
-			);
+			)
+			.then((s) => {
+				timeoutWarn = s.descEl.createDiv({ cls: 'mh-warn' });
+				timeoutWarn.setText('A very low timeout (under 20s) may abort requests before a slow server responds.');
+				updateTimeoutWarn();
+			});
 
 		const statusEl = createSpan({ cls: 'mh-test-status' });
 
