@@ -1,5 +1,10 @@
 import { moment } from 'obsidian';
-import { ReasoningLevel } from './utils';
+import {
+	DEFAULT_REASONING_BUDGETS,
+	DEFAULT_SUMMARY_MAX_TOKENS,
+	ReasoningBudgets,
+	ReasoningLevel,
+} from './utils';
 
 // Obsidian re-exports `moment` as a callable at runtime, but its bundled type is the
 // namespace (no call signature), so `tsc` rejects `moment(...)`. Alias to the call form.
@@ -34,6 +39,8 @@ export interface ScuttlebuttSettings {
 	llmTimeout: number; // seconds; 0 = wait indefinitely
 	reasoningEffort: ReasoningLevel; // 'off' disables model thinking; effort levels enable it
 	streamSummary: boolean; // stream the summary token-by-token into the review pane
+	summaryMaxTokens: number; // answer-token budget for the summary (before reasoning headroom)
+	reasoningBudgets: ReasoningBudgets; // per-level thinking headroom, added on top
 
 	// Prompts / language
 	summaryPrompt: string;
@@ -49,6 +56,7 @@ export interface ScuttlebuttSettings {
 	notesFolder: string;
 	audioFolder: string;
 	dateFormat: string;
+	filenameTemplate: string; // note filename; tokens {{date}} and {{title}}
 	saveAudio: boolean;
 	includeTranscript: boolean;
 	includeMemo: boolean;
@@ -57,9 +65,17 @@ export interface ScuttlebuttSettings {
 	generateTags: boolean;
 	generateTitle: boolean;
 	defaultTags: string[];
+
+	// Updates
+	updateCheckEnabled: boolean; // check GitHub for a newer release (at most once a day)
+	lastUpdateCheck: number; // epoch ms of the last check (throttle)
+	latestKnownVersion: string; // most recent version seen on GitHub
 }
 
 export const DEFAULT_DATE_FORMAT = 'dddd, MMMM Do YYYY, h:mm:ss a';
+
+// Note filename template. {{date}} -> YYYY-MM-DD, {{title}} -> the generated title.
+export const DEFAULT_FILENAME_TEMPLATE = '{{date}} - {{title}}';
 
 export const DEFAULT_SUMMARY_PROMPT = `# General Instructions
 
@@ -91,7 +107,7 @@ export const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	sttApiKey: '',
 	sttModel: '',
 	sttModels: [],
-	sttLanguage: 'en',
+	sttLanguage: 'auto',
 	sttDiarize: false,
 	sttTimeout: 300,
 
@@ -102,6 +118,8 @@ export const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	llmTimeout: 300,
 	reasoningEffort: 'off',
 	streamSummary: true,
+	summaryMaxTokens: DEFAULT_SUMMARY_MAX_TOKENS,
+	reasoningBudgets: { ...DEFAULT_REASONING_BUDGETS },
 
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	language: 'English',
@@ -114,6 +132,7 @@ export const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 	notesFolder: 'Scuttlebutt/Notes',
 	audioFolder: 'Scuttlebutt/Audio',
 	dateFormat: DEFAULT_DATE_FORMAT,
+	filenameTemplate: DEFAULT_FILENAME_TEMPLATE,
 	saveAudio: true,
 	includeTranscript: true,
 	includeMemo: true,
@@ -133,6 +152,10 @@ export const DEFAULT_SETTINGS: ScuttlebuttSettings = {
 		'Design',
 		'Recruiting',
 	],
+
+	updateCheckEnabled: true,
+	lastUpdateCheck: 0,
+	latestKnownVersion: '',
 };
 
 export type SessionStatus =

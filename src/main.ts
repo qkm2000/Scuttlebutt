@@ -11,19 +11,25 @@
  * Local-first. Everything runs against endpoints you configure. No cloud, no accounts.
  */
 
-import { Notice, Plugin, TFile, normalizePath } from 'obsidian';
+import { Notice, Plugin, TFile, normalizePath, requestUrl } from 'obsidian';
 import {
+	applyTemplate,
 	calloutBlock,
+	DEFAULT_REASONING_BUDGETS,
 	errorMessage,
 	formatDuration,
+	isNewerVersion,
+	isRecord,
 	recordedMs,
 	sanitizeFileName,
+	str,
 	structureSummary,
 	todayStamp,
 	yamlString,
 } from './utils';
 import {
 	DEFAULT_DATE_FORMAT,
+	DEFAULT_FILENAME_TEMPLATE,
 	DEFAULT_SETTINGS,
 	MeetingSession,
 	mmt,
@@ -104,6 +110,9 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 		this.statusBarEl = this.addStatusBarItem();
 		this.statusBarEl.addClass('mh-statusbar', 'mh-hidden');
+
+		// Check for a newer release once the workspace is ready (non-blocking, throttled).
+		this.app.workspace.onLayoutReady(() => void this.maybeCheckForUpdate());
 	}
 
 	onunload(): void {
@@ -114,6 +123,14 @@ export default class ScuttlebuttPlugin extends Plugin {
 	async loadSettings(): Promise<void> {
 		const saved = (await this.loadData()) as Partial<ScuttlebuttSettings> | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+		// reasoningBudgets is a nested object: clone the defaults and merge any saved
+		// values so editing it never mutates DEFAULT_SETTINGS, and older data (missing
+		// some levels) still gets every level filled in.
+		this.settings.reasoningBudgets = Object.assign(
+			{},
+			DEFAULT_REASONING_BUDGETS,
+			saved?.reasoningBudgets
+		);
 		this.ai = new AIService(this.settings);
 	}
 
@@ -122,6 +139,63 @@ export default class ScuttlebuttPlugin extends Plugin {
 		// no rebuild; and the sidebar reads session state, not settings, so no re-render is
 		// needed here. Re-rendering per keystroke rebuilt the audio Blob and reset playback.
 		await this.saveData(this.settings);
+	}
+
+	/**
+	 * Ask GitHub for the latest release at most once a day, remember it, and — if it
+	 * is newer than the installed version — show a one-time notice. Silent on failure;
+	 * a missed check should never nag. Skipped entirely when the user opts out.
+	 */
+	async maybeCheckForUpdate(): Promise<void> {
+		const s = this.settings;
+		if (!s.updateCheckEnabled) return;
+		const DAY_MS = 24 * 60 * 60 * 1000;
+		if (Date.now() - s.lastUpdateCheck >= DAY_MS) {
+			s.lastUpdateCheck = Date.now();
+			await this.saveSettings();
+			try {
+				const res = await requestUrl({
+					url: 'https://api.github.com/repos/qkm2000/Scuttlebutt/releases/latest',
+					headers: { Accept: 'application/vnd.github+json' },
+					throw: false,
+				});
+				const data: unknown = res.json;
+				if (isRecord(data)) {
+					const tag = str(data.tag_name).replace(/^v/i, '').trim();
+					if (tag) {
+						s.latestKnownVersion = tag;
+						await this.saveSettings();
+					}
+				}
+			} catch {
+				// network or parse failure — stay quiet
+			}
+		}
+		this.notifyIfUpdate();
+	}
+
+	/** Show an update notice with a jump-to-update action, if a newer version is known. */
+	private notifyIfUpdate(): void {
+		const latest = this.settings.latestKnownVersion;
+		if (!latest || !isNewerVersion(latest, this.manifest.version)) return;
+		const frag = createFragment((f) => {
+			f.appendText(`Scuttlebutt ${latest} is available (you have ${this.manifest.version}). `);
+			const link = f.createEl('a', { text: 'Update', href: '#' });
+			link.addEventListener('click', (e) => {
+				e.preventDefault();
+				this.openCommunityPlugins();
+			});
+		});
+		new Notice(frag, 15000);
+	}
+
+	/** Open Settings -> Community plugins so the user can update from there. */
+	openCommunityPlugins(): void {
+		const setting = (
+			this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }
+		).setting;
+		setting?.open();
+		setting?.openTabById('community-plugins');
 	}
 
 	async activateView(): Promise<void> {
@@ -700,7 +774,12 @@ export default class ScuttlebuttPlugin extends Plugin {
 
 		const now = new Date();
 		const title = s.title.trim() || 'Meeting';
-		const base = sanitizeFileName(`${todayStamp(now)} — ${title}`);
+		const base = sanitizeFileName(
+			applyTemplate(this.settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE, {
+				date: todayStamp(now),
+				title,
+			})
+		);
 		const existing = replacePath ? this.app.vault.getAbstractFileByPath(replacePath) : null;
 		const path =
 			existing instanceof TFile ? existing.path : await this.uniquePath(this.settings.notesFolder, base, 'md');

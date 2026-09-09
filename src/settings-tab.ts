@@ -8,8 +8,23 @@ import {
 	TextAreaComponent,
 	TextComponent,
 } from 'obsidian';
-import { AudioInput, DEFAULT_DATE_FORMAT, DEFAULT_SETTINGS, DEFAULT_SUMMARY_PROMPT, mmt } from './types';
-import { ReasoningLevel } from './utils';
+import {
+	AudioInput,
+	DEFAULT_DATE_FORMAT,
+	DEFAULT_FILENAME_TEMPLATE,
+	DEFAULT_SETTINGS,
+	DEFAULT_SUMMARY_PROMPT,
+	mmt,
+} from './types';
+import {
+	applyTemplate,
+	DEFAULT_REASONING_BUDGETS,
+	DEFAULT_SUMMARY_MAX_TOKENS,
+	isNewerVersion,
+	ReasoningLevel,
+	sanitizeFileName,
+	todayStamp,
+} from './utils';
 import { testEndpoint } from './ai';
 import type ScuttlebuttPlugin from './main';
 
@@ -21,7 +36,7 @@ interface EndpointOpts {
 	timeoutKey: 'sttTimeout' | 'llmTimeout';
 }
 
-type SettingsTab = 'transcription' | 'summary' | 'capture' | 'output';
+type SettingsTab = 'general' | 'transcription' | 'summary' | 'capture' | 'output';
 interface TabHandle {
 	btn: HTMLElement;
 	panel: HTMLElement;
@@ -35,7 +50,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 	// endpoint's dropdown in place without a re-render (keeping the status visible).
 	private modelDropdowns = new Map<string, DropdownComponent>();
 	// Remembered across opens so reopening settings lands on the last-used tab.
-	private activeTab: SettingsTab = 'transcription';
+	private activeTab: SettingsTab = 'general';
 
 	constructor(app: App, private plugin: ScuttlebuttPlugin) {
 		super(app, plugin);
@@ -78,6 +93,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 		const body = root.createDiv({ cls: 'mh-settings-body' });
 
 		const tabs: { id: SettingsTab; label: string; build: (el: HTMLElement) => void }[] = [
+			{ id: 'general', label: 'General', build: (el) => this.buildGeneral(el) },
 			{ id: 'transcription', label: 'Transcription', build: (el) => this.buildTranscription(el) },
 			{ id: 'summary', label: 'Summary', build: (el) => this.buildSummary(el) },
 			{ id: 'capture', label: 'Capture', build: (el) => this.buildCapture(el) },
@@ -96,7 +112,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			handles.set(tab.id, { btn, panel });
 			btn.addEventListener('click', () => this.selectTab(tab.id, handles));
 		}
-		if (!tabs.some((t) => t.id === this.activeTab)) this.activeTab = 'transcription';
+		if (!tabs.some((t) => t.id === this.activeTab)) this.activeTab = 'general';
 		this.selectTab(this.activeTab, handles);
 	}
 
@@ -107,6 +123,43 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			btn.toggleClass('is-active', active);
 			panel.toggleClass('mh-hidden', !active);
 		});
+	}
+
+	private buildGeneral(el: HTMLElement): void {
+		const version = this.plugin.manifest.version;
+		const latest = this.plugin.settings.latestKnownVersion;
+		const hasUpdate = !!latest && isNewerVersion(latest, version);
+
+		new Setting(el).setName('Updates').setHeading();
+		const status = new Setting(el).setName(`Scuttlebutt v${version}`);
+		if (hasUpdate) {
+			status.setDesc(`Update available: ${latest}`);
+			status.addButton((b) =>
+				b
+					.setButtonText('Update')
+					.setCta()
+					.onClick(() => this.plugin.openCommunityPlugins())
+			);
+		} else {
+			status.setDesc('Up to date.');
+		}
+		new Setting(el)
+			.setName('Notify me about updates')
+			.setDesc('Check GitHub for a newer version at most once a day and show a notice when one is available.')
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.updateCheckEnabled).onChange(async (v) => {
+					this.plugin.settings.updateCheckEnabled = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(el).setName('About').setHeading();
+		new Setting(el)
+			.setName('GitHub')
+			.setDesc('Source code, releases, and issues.')
+			.addButton((b) =>
+				b.setButtonText('Open').onClick(() => window.open('https://github.com/qkm2000/Scuttlebutt'))
+			);
 	}
 
 	// ---- small imperative row helpers ------------------------------------
@@ -135,15 +188,78 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 		desc: string,
 		get: () => string,
 		set: (v: string) => void,
-		placeholder?: string
+		opts?: { placeholder?: string; resetTo?: string }
 	): Setting {
-		return new Setting(el).setName(name).setDesc(desc).addText((t) => {
-			if (placeholder) t.setPlaceholder(placeholder);
+		let text!: TextComponent;
+		const setting = new Setting(el).setName(name).setDesc(desc).addText((t) => {
+			text = t;
+			if (opts?.placeholder) t.setPlaceholder(opts.placeholder);
 			t.setValue(get()).onChange(async (v) => {
 				set(v);
 				await this.plugin.saveSettings();
 			});
 		});
+		if (opts?.resetTo !== undefined) {
+			const resetTo = opts.resetTo;
+			setting.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						set(resetTo);
+						await this.plugin.saveSettings();
+						text.setValue(get());
+					})
+			);
+		}
+		return setting;
+	}
+
+	private numberRow(
+		el: HTMLElement,
+		name: string,
+		desc: string,
+		get: () => number,
+		set: (v: number) => void,
+		opts?: { min?: number; step?: number; resetTo?: number }
+	): Setting {
+		const min = opts?.min ?? 0;
+		let text!: TextComponent;
+		const setting = new Setting(el).setName(name).setDesc(desc).addText((t) => {
+			text = t;
+			t.inputEl.type = 'number';
+			t.inputEl.min = String(min);
+			if (opts?.step) t.inputEl.step = String(opts.step);
+			// Guard against corrupt values: only persist a finite number at/above the floor.
+			t.setValue(String(get())).onChange(async (v) => {
+				const n = Number(v);
+				if (Number.isFinite(n) && n >= min) {
+					set(Math.floor(n));
+					await this.plugin.saveSettings();
+				}
+			});
+		});
+		if (opts?.resetTo !== undefined) {
+			const resetTo = opts.resetTo;
+			setting.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						set(resetTo);
+						await this.plugin.saveSettings();
+						text.setValue(String(get()));
+					})
+			);
+		}
+		return setting;
+	}
+
+	/** A `<details>` section, collapsed by default, with a heading-styled summary. */
+	private collapsibleSection(el: HTMLElement, title: string): HTMLElement {
+		const details = el.createEl('details', { cls: 'mh-collapsible' });
+		details.createEl('summary', { cls: 'mh-collapsible-summary', text: title });
+		return details.createDiv({ cls: 'mh-collapsible-body' });
 	}
 
 	// ---- tab panels ------------------------------------------------------
@@ -165,7 +281,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			(v) => {
 				s.sttLanguage = v.trim();
 			},
-			'auto'
+			{ placeholder: 'auto', resetTo: DEFAULT_SETTINGS.sttLanguage }
 		);
 		this.toggleRow(
 			el,
@@ -258,6 +374,35 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 						'English is recommended for the most reliable results.'
 				)
 		);
+		const budgets = this.collapsibleSection(el, 'Token budgets (advanced)');
+		this.numberRow(
+			budgets,
+			'Summary length limit',
+			'Max tokens the model may use for the summary answer, before any reasoning headroom.',
+			() => s.summaryMaxTokens,
+			(v) => {
+				s.summaryMaxTokens = v;
+			},
+			{ min: 256, step: 256, resetTo: DEFAULT_SUMMARY_MAX_TOKENS }
+		);
+		const budgetDesc = 'Extra tokens reserved for thinking at this effort level (added on top of the summary limit).';
+		const budgetRow = (name: string, level: Exclude<ReasoningLevel, 'off'>) =>
+			this.numberRow(
+				budgets,
+				name,
+				budgetDesc,
+				() => s.reasoningBudgets[level],
+				(v) => {
+					s.reasoningBudgets[level] = v;
+				},
+				{ min: 0, step: 512, resetTo: DEFAULT_REASONING_BUDGETS[level] }
+			);
+		budgetRow('Reasoning headroom (low)', 'low');
+		budgetRow('Reasoning headroom (medium)', 'medium');
+		budgetRow('Reasoning headroom (high)', 'high');
+		budgetRow('Reasoning headroom (extra high)', 'xhigh');
+		budgetRow('Reasoning headroom (max)', 'max');
+
 		new Setting(el).setName('Summary prompt').setHeading();
 		this.renderSummaryPrompt(
 			new Setting(el)
@@ -315,7 +460,7 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			(v) => {
 				s.notesFolder = v.trim() || 'Scuttlebutt/Notes';
 			},
-			'Scuttlebutt/Notes'
+			{ placeholder: 'Scuttlebutt/Notes', resetTo: DEFAULT_SETTINGS.notesFolder }
 		);
 		this.textRow(
 			el,
@@ -325,7 +470,12 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			(v) => {
 				s.audioFolder = v.trim() || 'Scuttlebutt/Audio';
 			},
-			'Scuttlebutt/Audio'
+			{ placeholder: 'Scuttlebutt/Audio', resetTo: DEFAULT_SETTINGS.audioFolder }
+		);
+		this.renderFilenameTemplate(
+			new Setting(el)
+				.setName('Filename template')
+				.setDesc('How new note filenames are built. Tokens: {{date}} (YYYY-MM-DD) and {{title}}.')
 		);
 		this.renderDateFormat(
 			new Setting(el).setName('Date format').setDesc("Moment.js tokens for the note's date property.")
@@ -427,15 +577,28 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 
 	private renderApiKey(setting: Setting, opts: EndpointOpts): void {
 		const settings = this.plugin.settings;
-		setting.addText((t) => {
-			t.inputEl.type = 'password';
-			t.setPlaceholder('sk-…')
-				.setValue(settings[opts.apiKeyKey])
-				.onChange(async (v) => {
-					settings[opts.apiKeyKey] = v.trim();
-					await this.plugin.saveSettings();
-				});
-		});
+		let keyText!: TextComponent;
+		setting
+			.addText((t) => {
+				keyText = t;
+				t.inputEl.type = 'password';
+				t.setPlaceholder('sk-…')
+					.setValue(settings[opts.apiKeyKey])
+					.onChange(async (v) => {
+						settings[opts.apiKeyKey] = v.trim();
+						await this.plugin.saveSettings();
+					});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default (clears the key)')
+					.onClick(async () => {
+						settings[opts.apiKeyKey] = DEFAULT_SETTINGS[opts.apiKeyKey];
+						await this.plugin.saveSettings();
+						keyText.setValue(settings[opts.apiKeyKey]);
+					})
+			);
 	}
 
 	private renderModel(setting: Setting, opts: EndpointOpts): void {
@@ -564,6 +727,9 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 	}
 
 	private renderSummaryPrompt(setting: Setting): void {
+		// Stack this row (name/desc above) so the editor spans the full width
+		// instead of being squished into Obsidian's narrow control column.
+		setting.settingEl.addClass('mh-prompt-setting');
 		let promptArea!: TextAreaComponent;
 		setting
 			.addTextArea((t) => {
@@ -587,17 +753,64 @@ export class ScuttlebuttSettingTab extends PluginSettingTab {
 			);
 	}
 
+	private renderFilenameTemplate(setting: Setting): void {
+		const preview = setting.descEl.createDiv({ cls: 'mh-hint' });
+		const refresh = () => {
+			const tmpl = this.plugin.settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE;
+			const name = sanitizeFileName(applyTemplate(tmpl, { date: todayStamp(new Date()), title: 'Meeting' }));
+			preview.setText(`Preview: ${name}.md`);
+		};
+		let text!: TextComponent;
+		setting
+			.addText((t) => {
+				text = t;
+				t.setPlaceholder(DEFAULT_FILENAME_TEMPLATE)
+					.setValue(this.plugin.settings.filenameTemplate)
+					.onChange(async (v) => {
+						this.plugin.settings.filenameTemplate = v;
+						await this.plugin.saveSettings();
+						refresh();
+					});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						this.plugin.settings.filenameTemplate = DEFAULT_FILENAME_TEMPLATE;
+						await this.plugin.saveSettings();
+						text.setValue(this.plugin.settings.filenameTemplate);
+						refresh();
+					})
+			);
+		refresh();
+	}
+
 	private renderDateFormat(setting: Setting): void {
 		const preview = setting.descEl.createDiv({ cls: 'mh-hint' });
 		const refresh = () =>
 			preview.setText('Preview: ' + mmt().format(this.plugin.settings.dateFormat || DEFAULT_DATE_FORMAT));
-		setting.addText((t) =>
-			t.setValue(this.plugin.settings.dateFormat).onChange(async (v) => {
-				this.plugin.settings.dateFormat = v || DEFAULT_DATE_FORMAT;
-				await this.plugin.saveSettings();
-				refresh();
+		let dateText!: TextComponent;
+		setting
+			.addText((t) => {
+				dateText = t;
+				t.setValue(this.plugin.settings.dateFormat).onChange(async (v) => {
+					this.plugin.settings.dateFormat = v || DEFAULT_DATE_FORMAT;
+					await this.plugin.saveSettings();
+					refresh();
+				});
 			})
-		);
+			.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset to default')
+					.onClick(async () => {
+						this.plugin.settings.dateFormat = DEFAULT_DATE_FORMAT;
+						await this.plugin.saveSettings();
+						dateText.setValue(this.plugin.settings.dateFormat);
+						refresh();
+					})
+			);
 		refresh();
 	}
 

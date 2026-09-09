@@ -861,6 +861,24 @@
 	line-height: 1.5;
 }
 
+/* full-width prompt editor: stack name/desc above, let the textarea span the row */
+.mh-prompt-setting {
+	display: block;
+}
+
+.mh-prompt-setting .setting-item-info {
+	margin-bottom: 8px;
+}
+
+.mh-prompt-setting .setting-item-control {
+	width: 100%;
+	align-items: flex-start;
+}
+
+.mh-prompt-setting .setting-item-control textarea {
+	flex: 1;
+}
+
 /* an inline warning under a setting (e.g. a very low timeout) */
 .mh-warn {
 	margin-top: 4px;
@@ -914,6 +932,24 @@
 	width: 220px;
 	max-width: 100%;
 	text-overflow: ellipsis;
+}
+
+/* collapsible advanced section (e.g. token budgets), collapsed by default */
+.mh-collapsible {
+	margin: 8px 0 4px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.mh-collapsible > summary {
+	cursor: pointer;
+	padding: 12px 4px 8px;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+}
+
+.mh-collapsible > summary:hover {
+	color: var(--text-normal);
 }
 
 /* ---- status bar -------------------------------------------------------- */

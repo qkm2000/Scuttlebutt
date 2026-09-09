@@ -114,6 +114,20 @@ export function stripThink(text: string): string {
 
 /** How hard a reasoning model should think before answering (OpenAI-style effort ladder). */
 export type ReasoningLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** Per-level token headroom reserved for a thinking model (`off` is always 0). */
+export type ReasoningBudgets = Record<Exclude<ReasoningLevel, 'off'>, number>;
+
+/** Default answer-token budget for a summary (before any reasoning headroom). */
+export const DEFAULT_SUMMARY_MAX_TOKENS = 8192;
+
+/** Default per-level reasoning headroom. Users can override these in settings. */
+export const DEFAULT_REASONING_BUDGETS: ReasoningBudgets = {
+	low: 2048,
+	medium: 4096,
+	high: 8192,
+	xhigh: 16384,
+	max: 32768,
+};
 
 /**
  * Map a reasoning level to the extra chat-request params and the token headroom to
@@ -121,23 +135,42 @@ export type ReasoningLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
  * `enable_thinking:false`); the effort levels enable thinking, pass `reasoning_effort`
  * for servers that honor it, and reserve room so the reasoning never eats the answer.
  * Unknown params are ignored by servers that don't use them, so this is safe to send
- * to any OpenAI-compatible endpoint.
+ * to any OpenAI-compatible endpoint. `budgets` supplies the per-level headroom.
  */
-export function reasoningParams(level: ReasoningLevel): { params: Record<string, unknown>; headroom: number } {
+export function reasoningParams(
+	level: ReasoningLevel,
+	budgets: ReasoningBudgets = DEFAULT_REASONING_BUDGETS
+): { params: Record<string, unknown>; headroom: number } {
 	if (level === 'off') {
 		return { params: { chat_template_kwargs: { enable_thinking: false } }, headroom: 0 };
 	}
-	const headroom: Record<Exclude<ReasoningLevel, 'off'>, number> = {
-		low: 2048,
-		medium: 4096,
-		high: 8192,
-		xhigh: 16384,
-		max: 32768,
-	};
 	return {
 		params: { chat_template_kwargs: { enable_thinking: true }, reasoning_effort: level },
-		headroom: headroom[level] ?? 4096,
+		headroom: budgets[level] ?? DEFAULT_REASONING_BUDGETS[level],
 	};
+}
+
+/** Substitute `{{token}}` placeholders from `vars` (unknown tokens become empty). */
+export function applyTemplate(template: string, vars: Record<string, string>): string {
+	return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) => vars[key] ?? '');
+}
+
+/**
+ * True when `latest` is a strictly higher dotted version than `current`
+ * (e.g. "1.3.0" > "1.2.5"). A leading "v" is tolerated; non-numeric versions
+ * return false so a malformed tag never nags the user.
+ */
+export function isNewerVersion(latest: string, current: string): boolean {
+	const parse = (v: string) => v.replace(/^v/i, '').trim().split('.').map((n) => parseInt(n, 10));
+	const a = parse(latest);
+	const b = parse(current);
+	if (a.some(Number.isNaN) || b.some(Number.isNaN)) return false;
+	for (let i = 0; i < Math.max(a.length, b.length); i++) {
+		const x = a[i] ?? 0;
+		const y = b[i] ?? 0;
+		if (x !== y) return x > y;
+	}
+	return false;
 }
 
 /** Remove a leading ```markdown / ``` fence the model sometimes wraps output in. */
