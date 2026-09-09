@@ -4,7 +4,7 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - Belay That (2026-09-08)
+## [1.1.0] - Squared Away (2026-09-09)
 
 ### Added
 
