@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	applyTemplate,
 	buildMultipart,
 	calloutBlock,
 	formatDiarizedSegments,
 	formatDuration,
+	isNewerVersion,
 	joinUrl,
 	normalizeTag,
 	parseTagArray,
@@ -239,4 +241,31 @@ test('recordedMs handles multiple banked pauses', () => {
 test('recordedMs never goes negative on clock skew', () => {
 	assert.equal(recordedMs(0, 5000, 4000), 0); // now < segment start
 	assert.equal(recordedMs(1000, 5000, 4000), 1000); // banked kept, live clamped to 0
+});
+
+test('applyTemplate substitutes tokens and blanks unknown ones', () => {
+	assert.equal(applyTemplate('{{date}} - {{title}}', { date: '2026-09-09', title: 'Sync' }), '2026-09-09 - Sync');
+	assert.equal(applyTemplate('{{ title }}', { title: 'Spaced' }), 'Spaced'); // tolerant of inner spaces
+	assert.equal(applyTemplate('{{title}} ({{missing}})', { title: 'X' }), 'X ()'); // unknown -> empty
+	assert.equal(applyTemplate('no tokens', {}), 'no tokens');
+});
+
+test('isNewerVersion compares dotted versions', () => {
+	assert.equal(isNewerVersion('1.3.0', '1.2.5'), true);
+	assert.equal(isNewerVersion('1.2.10', '1.2.9'), true); // numeric, not lexical
+	assert.equal(isNewerVersion('2.0.0', '1.9.9'), true);
+	assert.equal(isNewerVersion('1.2.0', '1.2.0'), false); // equal
+	assert.equal(isNewerVersion('1.1.9', '1.2.0'), false); // older
+});
+
+test('isNewerVersion tolerates a v-prefix and shorter versions', () => {
+	assert.equal(isNewerVersion('v1.3.0', '1.2.0'), true);
+	assert.equal(isNewerVersion('1.2', '1.2.0'), false); // 1.2 == 1.2.0
+	assert.equal(isNewerVersion('1.2.1', '1.2'), true); // missing parts treated as 0
+});
+
+test('isNewerVersion returns false for malformed versions (never nags)', () => {
+	assert.equal(isNewerVersion('latest', '1.2.0'), false);
+	assert.equal(isNewerVersion('1.2.x', '1.2.0'), false);
+	assert.equal(isNewerVersion('', '1.2.0'), false);
 });

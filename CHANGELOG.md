@@ -4,6 +4,40 @@ All notable changes to Scuttlebutt are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - Safe Harbor (2026-09-09)
+
+### Added
+
+- Settings are now organized into tabs (General, Transcription, Summary, Capture,
+  Output) that switch instantly, replacing the navigable pages.
+- Configurable token budgets: set the summary length limit and the per-level
+  reasoning headroom that used to be fixed. Kept in an "advanced" section,
+  collapsed by default, with a note that too-small budgets can truncate output.
+- Note filename template with {{date}} and {{title}} tokens and a live preview,
+  so you control how saved notes are named.
+- Built-in update check: once a day Scuttlebutt checks GitHub for a newer release
+  and, if there is one, shows a notice with a jump to Community plugins. A new
+  General tab shows the installed version and a toggle to turn checks off.
+- A reset-to-default button on every free-text and numeric setting.
+
+### Changed
+
+- Default transcription language is now "auto" (the server detects the spoken
+  language) instead of English.
+- Bumped the CI and release GitHub Actions off the deprecated Node 20 runtime.
+
+### Security
+
+- API keys (transcription and summary) are now stored in Obsidian's secret
+  storage, backed by your operating system's keychain, instead of the plugin's
+  data.json. A key saved by an earlier version is migrated automatically on first
+  launch and scrubbed from data.json.
+
+### Fixed
+
+- Settings dropdowns no longer stretch to fit the selected option; they keep a
+  consistent width.
+
 ## [1.1.1] - Careened (2026-09-09)
 
 ### Changed

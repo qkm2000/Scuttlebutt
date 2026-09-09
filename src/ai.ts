@@ -221,7 +221,10 @@ export class AIService {
 		// `reasoningParams` disables thinking when off, and otherwise reserves headroom so
 		// the reasoning never starves the answer — critical for the tiny title/tag budgets.
 		// A per-run level (from the sidebar) overrides the global setting when given.
-		const { params, headroom } = reasoningParams(reasoning ?? this.settings.reasoningEffort ?? 'off');
+		const { params, headroom } = reasoningParams(
+			reasoning ?? this.settings.reasoningEffort ?? 'off',
+			this.settings.reasoningBudgets
+		);
 		return { url: joinUrl(this.settings.llmEndpoint, 'chat/completions'), headers, params, maxTokens: maxTokens + headroom };
 	}
 
@@ -433,7 +436,15 @@ export class AIService {
 
 		if (opts.onDelta) {
 			try {
-				const r = await this.chatStream(system, user, 8192, 0.3, opts.onDelta, opts.signal, opts.reasoning);
+				const r = await this.chatStream(
+					system,
+					user,
+					this.settings.summaryMaxTokens,
+					0.3,
+					opts.onDelta,
+					opts.signal,
+					opts.reasoning
+				);
 				return { summary: stripCodeFences(r.answer), reasoning: r.reasoning };
 			} catch (err) {
 				// A cancel or timeout is terminal; anything else (e.g. a server without CORS
@@ -443,7 +454,7 @@ export class AIService {
 				console.warn('Scuttlebutt: streaming failed, falling back to a one-shot request', err);
 			}
 		}
-		const raw = await this.chatRaw(system, user, 8192, 0.3, opts.signal, opts.reasoning);
+		const raw = await this.chatRaw(system, user, this.settings.summaryMaxTokens, 0.3, opts.signal, opts.reasoning);
 		const split = splitReasoning(raw.content);
 		const reasoning = [raw.reasoning.trim(), split.reasoning].filter(Boolean).join('\n').trim();
 		return { summary: stripCodeFences(split.answer), reasoning };
